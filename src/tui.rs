@@ -4,10 +4,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph};
-use ratatui::{backend::CrosstermBackend, symbols, Frame, Terminal};
+use ratatui::{backend::CrosstermBackend, Frame, Terminal};
 use std::io;
 use std::time::Duration;
 
@@ -477,6 +477,7 @@ fn render_help(f: &mut Frame, area: Rect) {
 ///
 /// The caller can pre-populate `Status` before calling this, and read
 /// back the final `Config` from the returned `App`.
+#[allow(dead_code)]
 pub fn run(app: App) -> Result<App> {
     // Set up terminal
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;

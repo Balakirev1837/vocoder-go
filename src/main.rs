@@ -7,6 +7,7 @@ mod tui;
 
 #[cfg(feature = "tui")]
 use tui::{App, Status};
+#[cfg(feature = "audio")]
 use vocoder::dsp;
 
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
