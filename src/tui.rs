@@ -127,7 +127,7 @@ pub struct App {
     pub status: Status,
     selected_field: usize,
     list_state: ListState,
-    should_quit: bool,
+    pub should_quit: bool,
 }
 
 impl App {
@@ -148,7 +148,7 @@ impl App {
         self
     }
 
-    fn handle_event(&mut self, evt: &Event) {
+    pub fn handle_event(&mut self, evt: &Event) {
         if let Event::Key(key) = evt {
             if key.kind != KeyEventKind::Press {
                 return;
@@ -185,7 +185,7 @@ impl App {
 
 // ── Rendering ──────────────────────────────────────────────────────
 
-fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
