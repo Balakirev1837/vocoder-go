@@ -111,16 +111,18 @@ pub fn start_midi_input() -> Result<MidiInputHandle> {
 
     let (sender, receiver) = mpsc::channel::<MidiEvent>();
 
-    let connection = midi_in.connect(
-        port,
-        &port_name,
-        move |_timestamp, data, _| {
-            let event = parse_midi_message(data);
-            // Ignore send errors — the receiver may have been dropped.
-            let _ = sender.send(event);
-        },
-        (),
-    )?;
+    let connection = midi_in
+        .connect(
+            port,
+            &port_name,
+            move |_timestamp, data, _| {
+                let event = parse_midi_message(data);
+                // Ignore send errors — the receiver may have been dropped.
+                let _ = sender.send(event);
+            },
+            (),
+        )
+        .map_err(|e| anyhow!("MIDI connection failed: {e}"))?;
 
     Ok(MidiInputHandle {
         connection,

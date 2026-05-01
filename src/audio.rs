@@ -24,12 +24,10 @@ impl Default for AudioIoConfig {
     }
 }
 
-/// Holds the running audio input and output streams plus the channel
-/// that delivers captured input blocks.
+/// Holds the running audio input and output streams.
 pub struct AudioIo {
     _input_stream: Stream,
     _output_stream: Stream,
-    input_rx: Receiver<AudioBlock>,
     config: StreamConfig,
 }
 
@@ -70,7 +68,6 @@ impl AudioIo {
         Ok(Self {
             _input_stream: input_stream,
             _output_stream: output_stream,
-            input_rx: rx,
             config,
         })
     }
@@ -78,12 +75,6 @@ impl AudioIo {
     /// Returns the active stream configuration (sample rate, channels, buffer).
     pub fn config(&self) -> &StreamConfig {
         &self.config
-    }
-
-    /// Tries to receive the latest available input block without blocking.
-    /// Returns `None` when no data is ready.
-    pub fn try_recv_input(&self) -> Option<AudioBlock> {
-        self.input_rx.try_recv().ok()
     }
 }
 
@@ -128,7 +119,7 @@ fn build_low_latency_config(
     let mut stream_config = supported_config.config();
 
     if let Some(size) = io_config.buffer_size {
-        stream_config.buffer_size = BufferSize::Fixed(size as usize);
+        stream_config.buffer_size = BufferSize::Fixed(size);
     }
 
     Ok((stream_config, sample_format))
