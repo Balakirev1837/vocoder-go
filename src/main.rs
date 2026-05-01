@@ -10,15 +10,15 @@ use tui::{App, Status};
 #[cfg(feature = "audio")]
 use vocoder::dsp;
 
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Build a new [`audio::AudioIo`] with the vocoder DSP callback bound to the
 /// given shared state. Used both at startup and when the user switches devices
 /// or changes audio-related config parameters.
 #[cfg(feature = "audio")]
 fn build_audio_io(
-    active_note: &Arc<AtomicU8>,
+    active_notes: &Arc<Mutex<Vec<u8>>>,
     input_level: &Arc<AtomicU32>,
     output_level: &Arc<AtomicU32>,
     input_device: Option<&str>,
@@ -29,7 +29,7 @@ fn build_audio_io(
     gain: &Arc<AtomicU32>,
     pitch_shift: &Arc<AtomicU32>,
 ) -> anyhow::Result<audio::AudioIo> {
-    let active_note = Arc::clone(active_note);
+    let active_notes = Arc::clone(active_notes);
     let input_level = Arc::clone(input_level);
     let output_level = Arc::clone(output_level);
     let gain = Arc::clone(gain);
@@ -51,7 +51,7 @@ fn build_audio_io(
         0.05, // attack / release
         sample_rate_f64,
     );
-    let mut phase: f64 = 0.0;
+    let mut phases = [0.0f64; 128];
 
     let config = audio::AudioIoConfig {
         sample_rate: Some(sample_rate),
@@ -69,15 +69,10 @@ fn build_audio_io(
                 .map(|s| s.as_slice())
                 .unwrap_or(&[]);
 
-            let note = active_note.load(Ordering::Relaxed);
-            let carrier_freq = if note < 128 {
-                let base_freq = 440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0);
-                // Apply pitch shift (in semitones) from TUI config.
-                let ps = f32::from_bits(pitch_shift.load(Ordering::Relaxed)) as f64;
-                base_freq * 2.0_f64.powf(ps / 12.0)
-            } else {
-                0.0
-            };
+            // Collect active notes for polyphonic carrier synthesis.
+            let notes = active_notes.lock().unwrap().clone();
+            let note_count = notes.len();
+            let ps = f32::from_bits(pitch_shift.load(Ordering::Relaxed)) as f64;
 
             // Read gain from shared atomic.
             let g = f32::from_bits(gain.load(Ordering::Relaxed));
@@ -90,14 +85,20 @@ fn build_audio_io(
                 let mod_sample = mod_samples.get(i).copied().unwrap_or(0.0) as f64;
                 max_in = max_in.max(mod_sample.abs() as f32);
 
-                // Carrier: sine at the MIDI note frequency (with pitch shift)
-                let carrier_sample = if carrier_freq > 0.0 {
-                    let s = phase.sin();
-                    phase += 2.0 * std::f64::consts::PI * carrier_freq / sample_rate_f64;
-                    if phase >= 2.0 * std::f64::consts::PI {
-                        phase -= 2.0 * std::f64::consts::PI;
+                // Carrier: sum sine waves for all active notes, divide by count to prevent clipping.
+                let carrier_sample = if note_count > 0 {
+                    let mut sum = 0.0f64;
+                    for &note in &notes {
+                        let idx = note as usize;
+                        sum += phases[idx].sin();
+                        let base_freq = 440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0);
+                        let freq = base_freq * 2.0_f64.powf(ps / 12.0);
+                        phases[idx] += 2.0 * std::f64::consts::PI * freq / sample_rate_f64;
+                        if phases[idx] >= 2.0 * std::f64::consts::PI {
+                            phases[idx] -= 2.0 * std::f64::consts::PI;
+                        }
                     }
-                    s
+                    sum / note_count as f64
                 } else {
                     0.0
                 };
@@ -119,8 +120,8 @@ fn build_audio_io(
 
 fn main() -> anyhow::Result<()> {
     // ── Shared state between audio callback, MIDI, and TUI ───────────
-    // 255 = no active note (valid MIDI notes are 0..=127).
-    let active_note = Arc::new(AtomicU8::new(255));
+    // Polyphonic: Vec of currently active MIDI note numbers (0..=127).
+    let active_notes = Arc::new(Mutex::new(Vec::<u8>::new()));
     let input_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let output_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
 
@@ -165,7 +166,7 @@ fn main() -> anyhow::Result<()> {
         );
 
         match build_audio_io(
-            &active_note,
+            &active_notes,
             &input_level,
             &output_level,
             None,
@@ -230,7 +231,7 @@ fn main() -> anyhow::Result<()> {
         let mut app = App::new(audio_inputs, audio_outputs, midi_ports).with_status(Status {
             audio_running,
             midi_connected,
-            current_note: None,
+            active_notes: Vec::new(),
             cpu_usage: 0.0,
             input_level: 0.0,
             output_level: 0.0,
@@ -260,14 +261,16 @@ fn main() -> anyhow::Result<()> {
                         midi::MidiEvent::NoteOn { channel, note, .. }
                             if channel == configured_channel =>
                         {
-                            active_note.store(note, Ordering::Relaxed);
+                            let mut notes = active_notes.lock().unwrap();
+                            if !notes.contains(&note) {
+                                notes.push(note);
+                            }
                         }
                         midi::MidiEvent::NoteOff { channel, note, .. }
                             if channel == configured_channel =>
                         {
-                            if active_note.load(Ordering::Relaxed) == note {
-                                active_note.store(255, Ordering::Relaxed);
-                            }
+                            let mut notes = active_notes.lock().unwrap();
+                            notes.retain(|&n| n != note);
                         }
                         _ => {}
                     }
@@ -275,14 +278,12 @@ fn main() -> anyhow::Result<()> {
             }
 
             // Refresh TUI status from shared state
-            let note_u8 = active_note.load(Ordering::Relaxed);
             app.status.audio_running = audio_running;
             app.status.midi_connected = midi_connected;
-            app.status.current_note = if note_u8 < 128 {
-                Some(midi_note_to_name(note_u8))
-            } else {
-                None
-            };
+            {
+                let notes = active_notes.lock().unwrap();
+                app.status.active_notes = notes.iter().map(|&n| midi_note_to_name(n)).collect();
+            }
             app.status.input_level = f32::from_bits(input_level.load(Ordering::Relaxed));
             app.status.output_level = f32::from_bits(output_level.load(Ordering::Relaxed));
 
@@ -323,7 +324,7 @@ fn main() -> anyhow::Result<()> {
                     let input_name = app.config.audio_input_device.as_deref();
                     let output_name = app.config.audio_output_device.as_deref();
                     match build_audio_io(
-                        &active_note,
+                        &active_notes,
                         &input_level,
                         &output_level,
                         input_name,

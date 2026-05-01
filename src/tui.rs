@@ -48,7 +48,7 @@ impl Default for Config {
 pub struct Status {
     pub audio_running: bool,
     pub midi_connected: bool,
-    pub current_note: Option<String>,
+    pub active_notes: Vec<String>,
     pub cpu_usage: f32,
     pub input_level: f32,
     pub output_level: f32,
@@ -532,7 +532,11 @@ fn render_cpu_and_note(f: &mut Frame, app: &App, area: Rect) {
         Color::Red
     };
 
-    let note_display = app.status.current_note.as_deref().unwrap_or("---");
+    let note_display = if app.status.active_notes.is_empty() {
+        "---".to_string()
+    } else {
+        app.status.active_notes.join(", ")
+    };
 
     let lines = vec![
         Line::from(vec![
