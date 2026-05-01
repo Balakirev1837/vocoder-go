@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, SampleFormat, SampleRate, Stream, StreamConfig};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 /// A block of audio samples captured from the input device.
 /// Each inner `Vec<f32>` is one channel's worth of samples.
@@ -83,6 +83,16 @@ impl Default for AudioIoConfig {
     }
 }
 
+/// Shared buffer state between input and output audio callbacks.
+/// Provides latest-value semantics with block recycling to avoid
+/// heap allocations in the real-time audio path.
+struct SharedBuffer {
+    /// Latest audio block written by input, waiting to be consumed by output.
+    latest: Option<AudioBlock>,
+    /// Previously consumed block returned by output for reuse by input.
+    recycle: Option<AudioBlock>,
+}
+
 /// Holds the running audio input and output streams.
 pub struct AudioIo {
     _input_stream: Stream,
@@ -123,10 +133,19 @@ impl AudioIo {
 
         let (config, sample_format) = build_low_latency_config(&output_device, io_config)?;
 
-        let (tx, rx): (Sender<AudioBlock>, Receiver<AudioBlock>) = mpsc::channel();
-        let input_stream = build_input_stream(&input_device, &config, sample_format, tx)?;
-        let output_stream =
-            build_output_stream(&output_device, &config, sample_format, rx, process)?;
+        let shared = Arc::new(Mutex::new(SharedBuffer {
+            latest: None,
+            recycle: None,
+        }));
+        let input_stream =
+            build_input_stream(&input_device, &config, sample_format, Arc::clone(&shared))?;
+        let output_stream = build_output_stream(
+            &output_device,
+            &config,
+            sample_format,
+            Arc::clone(&shared),
+            process,
+        )?;
 
         input_stream
             .play()
@@ -193,7 +212,7 @@ fn build_input_stream(
     device: &Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
-    tx: Sender<AudioBlock>,
+    shared: Arc<Mutex<SharedBuffer>>,
 ) -> Result<Stream> {
     let channels = config.channels;
     let err_fn = |err: cpal::StreamError| {
@@ -204,8 +223,20 @@ fn build_input_stream(
         SampleFormat::F32 => device.build_input_stream(
             config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let block = deinterleave(data, channels);
-                let _ = tx.send(block);
+                // Acquire a reusable block from the recycle slot
+                let mut block = {
+                    let mut guard = shared.lock().unwrap();
+                    guard
+                        .recycle
+                        .take()
+                        .unwrap_or_else(|| vec![Vec::new(); channels as usize])
+                };
+                // Write interleaved f32 data into the block (reuses allocations)
+                deinterleave_into(data, channels, &mut block, |s| s);
+                // Publish to latest slot; move any old latest to recycle
+                let mut guard = shared.lock().unwrap();
+                guard.recycle = guard.latest.take();
+                guard.latest = Some(block);
             },
             err_fn,
             None,
@@ -213,9 +244,18 @@ fn build_input_stream(
         SampleFormat::I16 => device.build_input_stream(
             config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                let block = deinterleave(&f32_data, channels);
-                let _ = tx.send(block);
+                let mut block = {
+                    let mut guard = shared.lock().unwrap();
+                    guard
+                        .recycle
+                        .take()
+                        .unwrap_or_else(|| vec![Vec::new(); channels as usize])
+                };
+                // Convert i16 → f32 and deinterleave directly into the block
+                deinterleave_into(data, channels, &mut block, |s: i16| s as f32 / 32768.0);
+                let mut guard = shared.lock().unwrap();
+                guard.recycle = guard.latest.take();
+                guard.latest = Some(block);
             },
             err_fn,
             None,
@@ -223,12 +263,20 @@ fn build_input_stream(
         SampleFormat::U16 => device.build_input_stream(
             config,
             move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                let f32_data: Vec<f32> = data
-                    .iter()
-                    .map(|&s| (s as f32 - 32768.0) / 32767.0)
-                    .collect();
-                let block = deinterleave(&f32_data, channels);
-                let _ = tx.send(block);
+                let mut block = {
+                    let mut guard = shared.lock().unwrap();
+                    guard
+                        .recycle
+                        .take()
+                        .unwrap_or_else(|| vec![Vec::new(); channels as usize])
+                };
+                // Convert u16 → f32 and deinterleave directly into the block
+                deinterleave_into(data, channels, &mut block, |s: u16| {
+                    (s as f32 - 32768.0) / 32768.0
+                });
+                let mut guard = shared.lock().unwrap();
+                guard.recycle = guard.latest.take();
+                guard.latest = Some(block);
             },
             err_fn,
             None,
@@ -243,7 +291,7 @@ fn build_output_stream(
     device: &Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
-    rx: Receiver<AudioBlock>,
+    shared: Arc<Mutex<SharedBuffer>>,
     mut process: impl FnMut(Option<&AudioBlock>, &mut [f32], u16) + Send + 'static,
 ) -> Result<Stream> {
     let channels = config.channels;
@@ -255,54 +303,89 @@ fn build_output_stream(
         SampleFormat::F32 => device.build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let input_block = rx.try_recv().ok();
+                // Take the latest input block (latest-value semantics)
+                let input_block = shared.lock().unwrap().latest.take();
                 process(input_block.as_ref(), data, channels);
-            },
-            err_fn,
-            None,
-        )?,
-        SampleFormat::I16 => device.build_output_stream(
-            config,
-            move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                let input_block = rx.try_recv().ok();
-                let mut f32_buf = vec![0.0f32; data.len()];
-                process(input_block.as_ref(), &mut f32_buf, channels);
-                for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
-                    *out = (*s * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                // Recycle the block for reuse by the input callback
+                if let Some(block) = input_block {
+                    shared.lock().unwrap().recycle = Some(block);
                 }
             },
             err_fn,
             None,
         )?,
-        SampleFormat::U16 => device.build_output_stream(
-            config,
-            move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                let input_block = rx.try_recv().ok();
-                let mut f32_buf = vec![0.0f32; data.len()];
-                process(input_block.as_ref(), &mut f32_buf, channels);
-                for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
-                    *out = (*s * 32767.0 + 32768.0).clamp(0.0, 65535.0) as u16;
-                }
-            },
-            err_fn,
-            None,
-        )?,
+        SampleFormat::I16 => {
+            // Pre-allocate conversion buffer to avoid per-callback allocation
+            let mut f32_buf: Vec<f32> = Vec::new();
+            device.build_output_stream(
+                config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    let input_block = shared.lock().unwrap().latest.take();
+                    f32_buf.resize(data.len(), 0.0);
+                    process(input_block.as_ref(), &mut f32_buf, channels);
+                    for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
+                        *out = (*s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                    }
+                    if let Some(block) = input_block {
+                        shared.lock().unwrap().recycle = Some(block);
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        }
+        SampleFormat::U16 => {
+            // Pre-allocate conversion buffer to avoid per-callback allocation
+            let mut f32_buf: Vec<f32> = Vec::new();
+            device.build_output_stream(
+                config,
+                move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                    let input_block = shared.lock().unwrap().latest.take();
+                    f32_buf.resize(data.len(), 0.0);
+                    process(input_block.as_ref(), &mut f32_buf, channels);
+                    for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
+                        *out = (*s * 32768.0 + 32768.0).clamp(0.0, 65535.0) as u16;
+                    }
+                    if let Some(block) = input_block {
+                        shared.lock().unwrap().recycle = Some(block);
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        }
         _ => anyhow::bail!("unsupported sample format {:?}", sample_format),
     };
 
     Ok(stream)
 }
 
-/// Converts interleaved samples into a per-channel `AudioBlock`.
-fn deinterleave(interleaved: &[f32], channels: u16) -> AudioBlock {
+/// Writes interleaved samples into a pre-allocated `AudioBlock`, applying
+/// a per-sample conversion function. Reuses existing vector capacities to
+/// avoid heap allocations in the real-time audio path.
+fn deinterleave_into<T: Copy>(
+    interleaved: &[T],
+    channels: u16,
+    block: &mut AudioBlock,
+    convert: impl Fn(T) -> f32,
+) {
     let ch = channels as usize;
     let frames = interleaved.len() / ch;
-    let mut block = vec![Vec::with_capacity(frames); ch];
-    for frame in interleaved.chunks_exact(ch) {
+    block.resize_with(ch, Vec::new);
+    for ch_vec in block.iter_mut() {
+        ch_vec.resize(frames, 0.0);
+    }
+    for (i, frame) in interleaved.chunks_exact(ch).enumerate() {
         for (c, sample) in frame.iter().enumerate() {
-            block[c].push(*sample);
+            block[c][i] = convert(*sample);
         }
     }
+}
+
+/// Converts interleaved f32 samples into a per-channel `AudioBlock`.
+fn deinterleave(interleaved: &[f32], channels: u16) -> AudioBlock {
+    let mut block = Vec::new();
+    deinterleave_into(interleaved, channels, &mut block, |s| s);
     block
 }
 
