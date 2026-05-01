@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "vocoder",
+  "project_id": "17455367-ab7d-42ac-acea-34e4bba23e63"
+}
