@@ -137,7 +137,26 @@ fn main() -> anyhow::Result<()> {
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
 
-        let mut app = App::new().with_status(Status {
+        // Gather available devices
+        #[cfg(feature = "audio")]
+        let (audio_inputs, audio_outputs) = {
+            let inputs = audio::list_input_devices()
+                .map(|ds| ds.into_iter().map(|d| d.name).collect())
+                .unwrap_or_default();
+            let outputs = audio::list_output_devices()
+                .map(|ds| ds.into_iter().map(|d| d.name).collect())
+                .unwrap_or_default();
+            (inputs, outputs)
+        };
+        #[cfg(not(feature = "audio"))]
+        let (audio_inputs, audio_outputs) = (Vec::new(), Vec::new());
+
+        #[cfg(feature = "midi")]
+        let midi_ports = midi::list_midi_input_ports().unwrap_or_default();
+        #[cfg(not(feature = "midi"))]
+        let midi_ports: Vec<String> = Vec::new();
+
+        let mut app = App::new(audio_inputs, audio_outputs, midi_ports).with_status(Status {
             audio_running,
             midi_connected,
             current_note: None,

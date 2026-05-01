@@ -16,6 +16,9 @@ use std::time::Duration;
 /// Configurable parameters for the vocoder.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub audio_input_device: Option<String>,
+    pub audio_output_device: Option<String>,
+    pub midi_input_port: Option<String>,
     pub sample_rate: u32,
     pub buffer_size: u32,
     pub midi_channel: u8,
@@ -27,6 +30,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            audio_input_device: None,
+            audio_output_device: None,
+            midi_input_port: None,
             sample_rate: 44_100,
             buffer_size: 512,
             midi_channel: 1,
@@ -51,6 +57,9 @@ pub struct Status {
 /// Which config field is currently selected for editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigField {
+    AudioInputDevice,
+    AudioOutputDevice,
+    MidiInputPort,
     SampleRate,
     BufferSize,
     MidiChannel,
@@ -59,7 +68,10 @@ enum ConfigField {
     Gain,
 }
 
-const CONFIG_FIELDS: [ConfigField; 6] = [
+const CONFIG_FIELDS: [ConfigField; 9] = [
+    ConfigField::AudioInputDevice,
+    ConfigField::AudioOutputDevice,
+    ConfigField::MidiInputPort,
     ConfigField::SampleRate,
     ConfigField::BufferSize,
     ConfigField::MidiChannel,
@@ -71,6 +83,9 @@ const CONFIG_FIELDS: [ConfigField; 6] = [
 impl ConfigField {
     fn label(&self) -> &'static str {
         match self {
+            Self::AudioInputDevice => "Audio Input",
+            Self::AudioOutputDevice => "Audio Output",
+            Self::MidiInputPort => "MIDI Input",
             Self::SampleRate => "Sample Rate",
             Self::BufferSize => "Buffer Size",
             Self::MidiChannel => "MIDI Channel",
@@ -82,6 +97,21 @@ impl ConfigField {
 
     fn display_value(&self, cfg: &Config) -> String {
         match self {
+            Self::AudioInputDevice => cfg
+                .audio_input_device
+                .as_deref()
+                .unwrap_or("(default)")
+                .to_string(),
+            Self::AudioOutputDevice => cfg
+                .audio_output_device
+                .as_deref()
+                .unwrap_or("(default)")
+                .to_string(),
+            Self::MidiInputPort => cfg
+                .midi_input_port
+                .as_deref()
+                .unwrap_or("(first available)")
+                .to_string(),
             Self::SampleRate => format!("{} Hz", cfg.sample_rate),
             Self::BufferSize => format!("{} samples", cfg.buffer_size),
             Self::MidiChannel => format!("Channel {}", cfg.midi_channel),
@@ -93,6 +123,8 @@ impl ConfigField {
 
     fn adjust(&self, cfg: &mut Config, delta: i32) {
         match self {
+            // Device fields are handled by App::cycle_device instead.
+            Self::AudioInputDevice | Self::AudioOutputDevice | Self::MidiInputPort => {}
             Self::SampleRate => {
                 let opts = [22_050, 44_100, 48_000, 96_000];
                 let idx = opts.iter().position(|&r| r == cfg.sample_rate).unwrap_or(1);
@@ -128,19 +160,57 @@ pub struct App {
     selected_field: usize,
     list_state: ListState,
     pub should_quit: bool,
+    audio_input_devices: Vec<String>,
+    audio_output_devices: Vec<String>,
+    midi_input_ports: Vec<String>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(
+        audio_input_devices: Vec<String>,
+        audio_output_devices: Vec<String>,
+        midi_input_ports: Vec<String>,
+    ) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+
+        let mut config = Config::default();
+
+        // Pre-select the first available device for each category.
+        if let Some(first) = audio_input_devices.first() {
+            config.audio_input_device = Some(first.clone());
+        }
+        if let Some(first) = audio_output_devices.first() {
+            config.audio_output_device = Some(first.clone());
+        }
+        if let Some(first) = midi_input_ports.first() {
+            config.midi_input_port = Some(first.clone());
+        }
+
         Self {
-            config: Config::default(),
+            config,
             status: Status::default(),
             selected_field: 0,
             list_state,
             should_quit: false,
+            audio_input_devices,
+            audio_output_devices,
+            midi_input_ports,
         }
+    }
+
+    /// Cycle through a device list, wrapping around at the ends.
+    fn cycle_device(current: &mut Option<String>, devices: &[String], delta: i32) {
+        if devices.is_empty() {
+            return;
+        }
+        let idx = match current.as_deref() {
+            Some(name) => devices.iter().position(|d| d == name).unwrap_or(0),
+            None => 0,
+        };
+        let len = devices.len() as i32;
+        let new_idx = ((idx as i32 + delta).rem_euclid(len)) as usize;
+        *current = Some(devices[new_idx].clone());
     }
 
     pub fn with_status(mut self, status: Status) -> Self {
@@ -171,11 +241,57 @@ impl App {
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
                     let field = CONFIG_FIELDS[self.selected_field];
-                    field.adjust(&mut self.config, 1);
+                    match field {
+                        ConfigField::AudioInputDevice => {
+                            Self::cycle_device(
+                                &mut self.config.audio_input_device,
+                                &self.audio_input_devices,
+                                1,
+                            );
+                        }
+                        ConfigField::AudioOutputDevice => {
+                            Self::cycle_device(
+                                &mut self.config.audio_output_device,
+                                &self.audio_output_devices,
+                                1,
+                            );
+                        }
+                        ConfigField::MidiInputPort => {
+                            Self::cycle_device(
+                                &mut self.config.midi_input_port,
+                                &self.midi_input_ports,
+                                1,
+                            );
+                        }
+                        _ => field.adjust(&mut self.config, 1),
+                    }
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
                     let field = CONFIG_FIELDS[self.selected_field];
-                    field.adjust(&mut self.config, -1);
+                    match field {
+                        ConfigField::AudioInputDevice => {
+                            Self::cycle_device(
+                                &mut self.config.audio_input_device,
+                                &self.audio_input_devices,
+                                -1,
+                            );
+                        }
+                        ConfigField::AudioOutputDevice => {
+                            Self::cycle_device(
+                                &mut self.config.audio_output_device,
+                                &self.audio_output_devices,
+                                -1,
+                            );
+                        }
+                        ConfigField::MidiInputPort => {
+                            Self::cycle_device(
+                                &mut self.config.midi_input_port,
+                                &self.midi_input_ports,
+                                -1,
+                            );
+                        }
+                        _ => field.adjust(&mut self.config, -1),
+                    }
                 }
                 _ => {}
             }
