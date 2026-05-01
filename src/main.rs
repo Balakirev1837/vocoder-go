@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Build a new [`audio::AudioIo`] with the vocoder DSP callback bound to the
-/// given shared state. Used both at startup and when the user switches devices.
+/// given shared state. Used both at startup and when the user switches devices
+/// or changes audio-related config parameters.
 #[cfg(feature = "audio")]
 fn build_audio_io(
     active_note: &Arc<AtomicU8>,
@@ -22,24 +23,39 @@ fn build_audio_io(
     output_level: &Arc<AtomicU32>,
     input_device: Option<&str>,
     output_device: Option<&str>,
+    sample_rate: u32,
+    buffer_size: u32,
+    formant_shift: f32,
+    gain: &Arc<AtomicU32>,
+    pitch_shift: &Arc<AtomicU32>,
 ) -> anyhow::Result<audio::AudioIo> {
     let active_note = Arc::clone(active_note);
     let input_level = Arc::clone(input_level);
     let output_level = Arc::clone(output_level);
+    let gain = Arc::clone(gain);
+    let pitch_shift = Arc::clone(pitch_shift);
+
+    let sample_rate_f64 = sample_rate as f64;
+
+    // Scale the analysis frequency range by formant_shift, clamped below Nyquist.
+    let nyquist = sample_rate_f64 / 2.0;
+    let low_freq = 200.0 * formant_shift as f64;
+    let high_freq = (8000.0 * formant_shift as f64).min(nyquist * 0.95);
 
     let mut vocoder = dsp::Vocoder::new(
         20, // bands
-        200.0, 8000.0, // freq range
-        4.0,    // Q
-        0.001, 0.05, // attack / release
-        44100.0,
+        low_freq,
+        high_freq,
+        4.0, // Q
+        0.001,
+        0.05, // attack / release
+        sample_rate_f64,
     );
     let mut phase: f64 = 0.0;
-    let sample_rate_f64: f64 = 44100.0;
 
     let config = audio::AudioIoConfig {
-        sample_rate: Some(44100),
-        buffer_size: Some(512),
+        sample_rate: Some(sample_rate),
+        buffer_size: Some(buffer_size),
     };
 
     audio::AudioIo::new(
@@ -55,10 +71,16 @@ fn build_audio_io(
 
             let note = active_note.load(Ordering::Relaxed);
             let carrier_freq = if note < 128 {
-                440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0)
+                let base_freq = 440.0 * 2.0_f64.powf((note as f64 - 69.0) / 12.0);
+                // Apply pitch shift (in semitones) from TUI config.
+                let ps = f32::from_bits(pitch_shift.load(Ordering::Relaxed)) as f64;
+                base_freq * 2.0_f64.powf(ps / 12.0)
             } else {
                 0.0
             };
+
+            // Read gain from shared atomic.
+            let g = f32::from_bits(gain.load(Ordering::Relaxed));
 
             let mut max_out = 0.0f32;
             let mut max_in = 0.0f32;
@@ -68,7 +90,7 @@ fn build_audio_io(
                 let mod_sample = mod_samples.get(i).copied().unwrap_or(0.0) as f64;
                 max_in = max_in.max(mod_sample.abs() as f32);
 
-                // Carrier: sine at the MIDI note frequency
+                // Carrier: sine at the MIDI note frequency (with pitch shift)
                 let carrier_sample = if carrier_freq > 0.0 {
                     let s = phase.sin();
                     phase += 2.0 * std::f64::consts::PI * carrier_freq / sample_rate_f64;
@@ -80,8 +102,8 @@ fn build_audio_io(
                     0.0
                 };
 
-                // Vocode: impose modulator spectral envelope onto carrier
-                let out = vocoder.process(mod_sample, carrier_sample) as f32;
+                // Vocode: impose modulator spectral envelope onto carrier, then apply gain.
+                let out = (vocoder.process(mod_sample, carrier_sample) as f32) * g;
                 max_out = max_out.max(out.abs());
 
                 for sample in frame.iter_mut() {
@@ -102,6 +124,12 @@ fn main() -> anyhow::Result<()> {
     let input_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let output_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
 
+    // Shared atomics for real-time adjustable parameters (read in audio callback).
+    #[cfg(feature = "tui")]
+    let gain = Arc::new(AtomicU32::new(tui::Config::default().gain.to_bits()));
+    #[cfg(feature = "tui")]
+    let pitch_shift = Arc::new(AtomicU32::new(tui::Config::default().pitch_shift.to_bits()));
+
     // ── Start MIDI input ─────────────────────────────────────────────
     #[cfg(feature = "midi")]
     let mut midi_handle = match midi::start_midi_input(None) {
@@ -120,7 +148,34 @@ fn main() -> anyhow::Result<()> {
     // ── Start audio I/O with vocoder DSP ─────────────────────────────
     #[cfg(feature = "audio")]
     let mut _audio_io: Option<audio::AudioIo> = {
-        match build_audio_io(&active_note, &input_level, &output_level, None, None) {
+        #[cfg(feature = "tui")]
+        let (sr, bs, fs) = {
+            let cfg = tui::Config::default();
+            (cfg.sample_rate, cfg.buffer_size, cfg.formant_shift)
+        };
+        #[cfg(not(feature = "tui"))]
+        let (sr, bs, fs) = (44_100u32, 512u32, 1.0f32);
+
+        #[cfg(feature = "tui")]
+        let (g, ps) = (gain.clone(), pitch_shift.clone());
+        #[cfg(not(feature = "tui"))]
+        let (g, ps) = (
+            Arc::new(AtomicU32::new(0.8f32.to_bits())),
+            Arc::new(AtomicU32::new(0.0f32.to_bits())),
+        );
+
+        match build_audio_io(
+            &active_note,
+            &input_level,
+            &output_level,
+            None,
+            None,
+            sr,
+            bs,
+            fs,
+            &g,
+            &ps,
+        ) {
             Ok(io) => Some(io),
             Err(e) => {
                 eprintln!("Audio: {}", e);
@@ -181,11 +236,17 @@ fn main() -> anyhow::Result<()> {
             output_level: 0.0,
         });
 
-        // Track currently active devices so we can detect changes.
+        // Track currently active devices and audio config so we can detect changes.
         #[cfg(feature = "audio")]
         let mut prev_audio_input = app.config.audio_input_device.clone();
         #[cfg(feature = "audio")]
         let mut prev_audio_output = app.config.audio_output_device.clone();
+        #[cfg(feature = "audio")]
+        let mut prev_sample_rate = app.config.sample_rate;
+        #[cfg(feature = "audio")]
+        let mut prev_buffer_size = app.config.buffer_size;
+        #[cfg(feature = "audio")]
+        let mut prev_formant_shift = app.config.formant_shift;
         #[cfg(feature = "midi")]
         let mut prev_midi_port = app.config.midi_input_port.clone();
 
@@ -193,12 +254,17 @@ fn main() -> anyhow::Result<()> {
             // Poll MIDI events and update the shared active note
             #[cfg(feature = "midi")]
             if let Some(ref handle) = midi_handle {
+                let configured_channel = app.config.midi_channel.saturating_sub(1);
                 while let Ok(evt) = handle.receiver.try_recv() {
                     match evt {
-                        midi::MidiEvent::NoteOn { note, .. } => {
+                        midi::MidiEvent::NoteOn { channel, note, .. }
+                            if channel == configured_channel =>
+                        {
                             active_note.store(note, Ordering::Relaxed);
                         }
-                        midi::MidiEvent::NoteOff { note, .. } => {
+                        midi::MidiEvent::NoteOff { channel, note, .. }
+                            if channel == configured_channel =>
+                        {
                             if active_note.load(Ordering::Relaxed) == note {
                                 active_note.store(255, Ordering::Relaxed);
                             }
@@ -220,6 +286,13 @@ fn main() -> anyhow::Result<()> {
             app.status.input_level = f32::from_bits(input_level.load(Ordering::Relaxed));
             app.status.output_level = f32::from_bits(output_level.load(Ordering::Relaxed));
 
+            // Push real-time config values into shared atomics for the audio callback.
+            #[cfg(feature = "audio")]
+            {
+                gain.store(app.config.gain.to_bits(), Ordering::Relaxed);
+                pitch_shift.store(app.config.pitch_shift.to_bits(), Ordering::Relaxed);
+            }
+
             // Render
             terminal.draw(|f| tui::draw(f, &app))?;
 
@@ -229,14 +302,20 @@ fn main() -> anyhow::Result<()> {
                 app.handle_event(&evt);
             }
 
-            // ── Detect device changes and restart streams ────────────
+            // ── Detect config changes and restart streams ─────────────
             #[cfg(feature = "audio")]
             {
                 let input_changed = app.config.audio_input_device != prev_audio_input;
                 let output_changed = app.config.audio_output_device != prev_audio_output;
-                if input_changed || output_changed {
+                let sr_changed = app.config.sample_rate != prev_sample_rate;
+                let bs_changed = app.config.buffer_size != prev_buffer_size;
+                let fs_changed = app.config.formant_shift != prev_formant_shift;
+                if input_changed || output_changed || sr_changed || bs_changed || fs_changed {
                     prev_audio_input = app.config.audio_input_device.clone();
                     prev_audio_output = app.config.audio_output_device.clone();
+                    prev_sample_rate = app.config.sample_rate;
+                    prev_buffer_size = app.config.buffer_size;
+                    prev_formant_shift = app.config.formant_shift;
 
                     // Drop old stream first
                     _audio_io = None;
@@ -249,6 +328,11 @@ fn main() -> anyhow::Result<()> {
                         &output_level,
                         input_name,
                         output_name,
+                        app.config.sample_rate,
+                        app.config.buffer_size,
+                        app.config.formant_shift,
+                        &gain,
+                        &pitch_shift,
                     ) {
                         Ok(io) => {
                             _audio_io = Some(io);
