@@ -2,7 +2,10 @@ package vocoder
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -43,6 +46,129 @@ func DefaultConfig() Config {
 		Gain:              1.0,
 		KeyboardMode:      false,
 	}
+}
+
+// ── Shared state between TUI and audio/MIDI ────────────────────────
+
+// SharedState holds the state shared between the TUI goroutine and the
+// audio/MIDI callback goroutines. Access to mutable fields is protected
+// by mu.
+type SharedState struct {
+	mu sync.Mutex
+
+	// Config is modified by the TUI goroutine and read by the audio
+	// callback (only Gain and KeyboardMode are read at audio-time).
+	Config Config
+
+	// Live status updated by the audio callback, read by the TUI.
+	InputLevel  float32
+	OutputLevel float32
+	AudioActive bool
+	MIDIActive  bool
+
+	// Resources managed by the TUI goroutine.
+	AudioStreams *AudioStreams
+	MIDIStop     func()
+
+	// DSP state – only accessed from the audio callback thread.
+	// These are safe because the audio stream is stopped (and the
+	// callback quiesced) before these fields are modified during a
+	// restart.
+	ActiveNotes *ActiveNotes
+	Vocoder     *Vocoder
+	Phases      map[uint8]float64
+	SampleRate  float64
+}
+
+// NewSharedState creates a SharedState with default config and DSP.
+func NewSharedState() *SharedState {
+	return &SharedState{
+		Config:      DefaultConfig(),
+		ActiveNotes: NewActiveNotes(),
+		Vocoder:     NewVocoder(20, 200.0, 8000.0, 4.0, 0.001, 0.05, 44100.0),
+		Phases:      make(map[uint8]float64),
+		SampleRate:  44100.0,
+	}
+}
+
+// ProcessAudio is the audio callback invoked for each audio block.
+//
+// It reads the active MIDI notes, generates a carrier (sum of sines
+// normalised by 1/sqrt(N)), applies vocoder DSP (or bypasses it in
+// Keyboard mode), applies soft clipping via math.Tanh, and applies
+// makeup gain.
+func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channels uint32) {
+	s.mu.Lock()
+	gain := s.Config.Gain
+	keyboardMode := s.Config.KeyboardMode
+	s.mu.Unlock()
+
+	notes := s.ActiveNotes.List()
+	n := len(notes)
+	sr := s.SampleRate
+
+	frames := len(output) / int(channels)
+	var maxInput, maxOutput float32
+
+	for i := 0; i < frames; i++ {
+		idx := i * int(channels)
+
+		// Read modulator (first channel).
+		var mod float64
+		if idx < len(modulator) {
+			mod = float64(modulator[idx])
+		}
+		absIn := float32(math.Abs(mod))
+		if absIn > maxInput {
+			maxInput = absIn
+		}
+
+		// Generate carrier: sum of sines / sqrt(N).
+		var carrier float64
+		if n > 0 {
+			invSqrtN := 1.0 / math.Sqrt(float64(n))
+			for _, note := range notes {
+				freq := 440.0 * math.Pow(2.0, (float64(note)-69.0)/12.0)
+				s.Phases[note] += freq / sr
+				// Wrap phase to [0, 1).
+				s.Phases[note] -= math.Floor(s.Phases[note])
+				carrier += math.Sin(2.0*math.Pi*s.Phases[note]) * invSqrtN
+			}
+		}
+
+		// Apply vocoder DSP or bypass.
+		var sample float64
+		if keyboardMode {
+			sample = carrier
+		} else {
+			sample = s.Vocoder.Process(mod, carrier)
+		}
+
+		// Soft clip.
+		sample = math.Tanh(sample)
+
+		// Makeup gain.
+		sample *= float64(gain)
+
+		out := float32(sample)
+		absOut := float32(math.Abs(float64(out)))
+		if absOut > maxOutput {
+			maxOutput = absOut
+		}
+
+		// Fill all output channels.
+		for ch := 0; ch < int(channels); ch++ {
+			if idx+ch < len(output) {
+				output[idx+ch] = out
+			}
+		}
+	}
+
+	// Update status for TUI.
+	s.mu.Lock()
+	s.InputLevel = maxInput
+	s.OutputLevel = maxOutput
+	s.mu.Unlock()
 }
 
 // ── Config field definitions ───────────────────────────────────────
@@ -166,6 +292,18 @@ func (f configField) adjust(cfg *Config, delta int) {
 	}
 }
 
+// needsRestart returns true if changing this field requires restarting
+// the audio/MIDI streams.
+func (f configField) needsRestart() bool {
+	switch f {
+	case fieldAudioInputDevice, fieldAudioOutputDevice,
+		fieldMidiInputPort, fieldSampleRate, fieldBufferSize:
+		return true
+	default:
+		return false
+	}
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 func clamp(val, min, max int) int {
@@ -211,6 +349,25 @@ func cycleDevice(current **string, devices []string, delta int) {
 	}
 	newIdx := ((idx+delta)%len(devices) + len(devices)) % len(devices)
 	*current = &devices[newIdx]
+}
+
+// noteName converts a MIDI note number to a human-readable name (e.g. 60 → "C4").
+func noteName(n uint8) string {
+	names := []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+	octave := int(n)/12 - 1
+	return fmt.Sprintf("%s%d", names[int(n)%12], octave)
+}
+
+// levelBar renders a level meter bar of given width (0..width blocks filled).
+func levelBar(level float32, width int) string {
+	filled := int(float32(width) * clampFloat(level, 0.0, 1.0))
+	if filled > width {
+		filled = width
+	}
+	return fmt.Sprintf("[%s%s]",
+		strings.Repeat("█", filled),
+		strings.Repeat("░", width-filled),
+	)
 }
 
 // ── Styles ─────────────────────────────────────────────────────────
@@ -286,13 +443,17 @@ var (
 			BorderForeground(lipgloss.Color("#555555"))
 )
 
+// ── Bubble Tea messages ────────────────────────────────────────────
+
+// tickMsg is sent periodically to refresh the status display.
+type tickMsg time.Time
+
 // ── Bubble Tea Model ───────────────────────────────────────────────
 
 // model is the top-level Bubble Tea model implementing tea.Model.
 type model struct {
-	config     Config
-	cursor     int
-	shouldQuit bool
+	state  *SharedState
+	cursor int
 
 	// Device lists for cycling
 	audioInputDevices  []string
@@ -300,47 +461,56 @@ type model struct {
 	midiInputPorts     []string
 }
 
-// newModel creates a new TUI model with the given device lists.
-func newModel(audioIn, audioOut, midiIn []string) model {
-	cfg := DefaultConfig()
+// newModel creates a new TUI model with the given shared state and device lists.
+func newModel(state *SharedState, audioIn, audioOut, midiIn []string) model {
+	cfg := &state.Config
 
 	// Pre-select the first available device for each category.
-	if len(audioIn) > 0 {
+	if len(audioIn) > 0 && cfg.AudioInputDevice == nil {
 		cfg.AudioInputDevice = &audioIn[0]
 	}
-	if len(audioOut) > 0 {
+	if len(audioOut) > 0 && cfg.AudioOutputDevice == nil {
 		cfg.AudioOutputDevice = &audioOut[0]
 	}
-	if len(midiIn) > 0 {
+	if len(midiIn) > 0 && cfg.MidiInputPort == nil {
 		cfg.MidiInputPort = &midiIn[0]
 	}
 
 	return model{
-		config:             cfg,
+		state:              state,
 		cursor:             0,
-		shouldQuit:         false,
 		audioInputDevices:  audioIn,
 		audioOutputDevices: audioOut,
 		midiInputPorts:     midiIn,
 	}
 }
 
-// Init satisfies tea.Model. No initial I/O needed.
+// Init satisfies tea.Model. Starts the periodic status tick.
 func (m model) Init() tea.Cmd {
-	return nil
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 // Update handles incoming messages and returns an updated model + command.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		// Periodic status refresh — just re-render by requesting the next tick.
+		return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		})
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":
-			m.shouldQuit = true
+			m.stopStreams()
 			return m, tea.Quit
 
 		case "tab":
-			m.config.KeyboardMode = !m.config.KeyboardMode
+			m.state.mu.Lock()
+			m.state.Config.KeyboardMode = !m.state.Config.KeyboardMode
+			m.state.mu.Unlock()
 
 		case "up", "k":
 			if m.cursor > 0 {
@@ -354,28 +524,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "right", "l":
 			field := configFields[m.cursor]
+			m.state.mu.Lock()
 			switch field {
 			case fieldAudioInputDevice:
-				cycleDevice(&m.config.AudioInputDevice, m.audioInputDevices, 1)
+				cycleDevice(&m.state.Config.AudioInputDevice, m.audioInputDevices, 1)
 			case fieldAudioOutputDevice:
-				cycleDevice(&m.config.AudioOutputDevice, m.audioOutputDevices, 1)
+				cycleDevice(&m.state.Config.AudioOutputDevice, m.audioOutputDevices, 1)
 			case fieldMidiInputPort:
-				cycleDevice(&m.config.MidiInputPort, m.midiInputPorts, 1)
+				cycleDevice(&m.state.Config.MidiInputPort, m.midiInputPorts, 1)
 			default:
-				field.adjust(&m.config, 1)
+				field.adjust(&m.state.Config, 1)
+			}
+			m.state.mu.Unlock()
+			if field.needsRestart() {
+				m.restartStreams()
 			}
 
 		case "left", "h":
 			field := configFields[m.cursor]
+			m.state.mu.Lock()
 			switch field {
 			case fieldAudioInputDevice:
-				cycleDevice(&m.config.AudioInputDevice, m.audioInputDevices, -1)
+				cycleDevice(&m.state.Config.AudioInputDevice, m.audioInputDevices, -1)
 			case fieldAudioOutputDevice:
-				cycleDevice(&m.config.AudioOutputDevice, m.audioOutputDevices, -1)
+				cycleDevice(&m.state.Config.AudioOutputDevice, m.audioOutputDevices, -1)
 			case fieldMidiInputPort:
-				cycleDevice(&m.config.MidiInputPort, m.midiInputPorts, -1)
+				cycleDevice(&m.state.Config.MidiInputPort, m.midiInputPorts, -1)
 			default:
-				field.adjust(&m.config, -1)
+				field.adjust(&m.state.Config, -1)
+			}
+			m.state.mu.Unlock()
+			if field.needsRestart() {
+				m.restartStreams()
 			}
 		}
 	}
@@ -407,9 +587,13 @@ func (m model) View() string {
 
 // renderTitle renders the top title bar with mode indicator.
 func (m model) renderTitle() string {
+	m.state.mu.Lock()
+	keyboardMode := m.state.Config.KeyboardMode
+	m.state.mu.Unlock()
+
 	modeLabel := "VOCODER"
 	modeStyle := modeVocoderStyle
-	if m.config.KeyboardMode {
+	if keyboardMode {
 		modeLabel = "KEYBOARD"
 		modeStyle = modeKeyboardStyle
 	}
@@ -433,6 +617,10 @@ func (m model) renderTitle() string {
 
 // renderConfigPanel renders the left column with config fields.
 func (m model) renderConfigPanel() string {
+	m.state.mu.Lock()
+	cfg := m.state.Config
+	m.state.mu.Unlock()
+
 	var b strings.Builder
 
 	header := configTitleStyle.Render(" ⚙  Configuration ")
@@ -441,7 +629,7 @@ func (m model) renderConfigPanel() string {
 
 	for i, field := range configFields {
 		label := field.label()
-		value := field.displayValue(m.config)
+		value := field.displayValue(cfg)
 
 		if i == m.cursor {
 			cursor := cursorStyle.Render("▶")
@@ -468,8 +656,18 @@ func (m model) renderConfigPanel() string {
 	return box
 }
 
-// renderStatusPanel renders the right column with status info.
+// renderStatusPanel renders the right column with live status info.
 func (m model) renderStatusPanel() string {
+	m.state.mu.Lock()
+	audioActive := m.state.AudioActive
+	midiActive := m.state.MIDIActive
+	inputLevel := m.state.InputLevel
+	outputLevel := m.state.OutputLevel
+	m.state.mu.Unlock()
+
+	noteCount := m.state.ActiveNotes.Count()
+	activeNotes := m.state.ActiveNotes.List()
+
 	var b strings.Builder
 
 	header := statusTitleStyle.Render(" ♪  Status ")
@@ -477,28 +675,52 @@ func (m model) renderStatusPanel() string {
 	b.WriteString("\n")
 
 	// Audio status
-	audioIcon := statusFailStyle.Render("○")
-	audioText := statusFailStyle.Render("Stopped")
-	b.WriteString(fmt.Sprintf(" %s Audio   %s\n", audioIcon, audioText))
+	if audioActive {
+		audioIcon := statusOKStyle.Render("●")
+		audioText := statusOKStyle.Render("Running")
+		b.WriteString(fmt.Sprintf(" %s Audio   %s\n", audioIcon, audioText))
+	} else {
+		audioIcon := statusFailStyle.Render("○")
+		audioText := statusFailStyle.Render("Stopped")
+		b.WriteString(fmt.Sprintf(" %s Audio   %s\n", audioIcon, audioText))
+	}
 
 	// MIDI status
-	midiIcon := statusFailStyle.Render("○")
-	midiText := statusFailStyle.Render("Disconnected")
-	b.WriteString(fmt.Sprintf(" %s MIDI    %s\n", midiIcon, midiText))
+	if midiActive {
+		midiIcon := statusOKStyle.Render("●")
+		midiText := statusOKStyle.Render("Connected")
+		b.WriteString(fmt.Sprintf(" %s MIDI    %s\n", midiIcon, midiText))
+	} else {
+		midiIcon := statusFailStyle.Render("○")
+		midiText := statusFailStyle.Render("Disconnected")
+		b.WriteString(fmt.Sprintf(" %s MIDI    %s\n", midiIcon, midiText))
+	}
 
 	// Levels
 	b.WriteString("\n")
+	inPct := int(clampFloat(inputLevel*100, 0, 100))
 	b.WriteString(inputLevelStyle.Render("  In  "))
-	b.WriteString(fmt.Sprintf("[%-20s] 0%%\n", strings.Repeat("░", 20)))
-	b.WriteString(outputLevelStyle.Render(" Out "))
-	b.WriteString(fmt.Sprintf("[%-20s] 0%%\n", strings.Repeat("░", 20)))
+	b.WriteString(fmt.Sprintf("%s %d%%\n", levelBar(inputLevel, 20), inPct))
 
-	// CPU + Note
+	outPct := int(clampFloat(outputLevel*100, 0, 100))
+	b.WriteString(outputLevelStyle.Render(" Out "))
+	b.WriteString(fmt.Sprintf("%s %d%%\n", levelBar(outputLevel, 20), outPct))
+
+	// Note display
 	b.WriteString("\n")
-	b.WriteString(" CPU   0% ")
-	b.WriteString(strings.Repeat("░", 20))
-	b.WriteString("\n")
-	b.WriteString(" Note  ♫ ---")
+	if noteCount > 0 {
+		names := make([]string, 0, len(activeNotes))
+		for _, n := range activeNotes {
+			names = append(names, noteName(n))
+		}
+		noteStr := strings.Join(names, " ")
+		if len(noteStr) > 30 {
+			noteStr = noteStr[:30] + "…"
+		}
+		b.WriteString(fmt.Sprintf(" Notes  ♫ %s", noteStr))
+	} else {
+		b.WriteString(" Notes  ♫ ---")
+	}
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -540,14 +762,86 @@ func (m model) renderHelp() string {
 	return box
 }
 
+// ── Stream lifecycle ───────────────────────────────────────────────
+
+// restartStreams stops existing audio and MIDI streams and restarts them
+// with the current config.
+func (m model) restartStreams() {
+	m.state.mu.Lock()
+	cfg := m.state.Config
+	m.state.mu.Unlock()
+
+	// Stop existing streams first (synchronous — callback will quiesce).
+	m.stopStreams()
+
+	// Reset DSP state for the new sample rate.
+	m.state.mu.Lock()
+	sr := float64(cfg.SampleRate)
+	m.state.SampleRate = sr
+	m.state.Vocoder = NewVocoder(20, 200.0, 8000.0, 4.0, 0.001, 0.05, sr)
+	m.state.Phases = make(map[uint8]float64)
+	m.state.mu.Unlock()
+
+	// Start audio duplex stream.
+	streams, err := StartAudio(AudioConfig{
+		SampleRate: cfg.SampleRate,
+		BufferSize: cfg.BufferSize,
+	}, m.state.ProcessAudio)
+	m.state.mu.Lock()
+	if err != nil {
+		m.state.AudioActive = false
+		m.state.AudioStreams = nil
+	} else {
+		m.state.AudioStreams = streams
+		m.state.AudioActive = true
+	}
+	m.state.mu.Unlock()
+
+	// Start MIDI input.
+	if cfg.MidiInputPort != nil {
+		stop, err := ListenToPort(*cfg.MidiInputPort, m.state.ActiveNotes)
+		m.state.mu.Lock()
+		if err != nil {
+			m.state.MIDIActive = false
+			m.state.MIDIStop = nil
+		} else {
+			m.state.MIDIStop = stop
+			m.state.MIDIActive = true
+		}
+		m.state.mu.Unlock()
+	}
+}
+
+// stopStreams stops and releases all audio and MIDI resources.
+func (m model) stopStreams() {
+	m.state.mu.Lock()
+	if m.state.AudioStreams != nil {
+		m.state.AudioStreams.Close()
+		m.state.AudioStreams = nil
+	}
+	if m.state.MIDIStop != nil {
+		m.state.MIDIStop()
+		m.state.MIDIStop = nil
+	}
+	m.state.AudioActive = false
+	m.state.MIDIActive = false
+	m.state.mu.Unlock()
+}
+
 // ── Public entry point ─────────────────────────────────────────────
 
 // RunTUI launches the Bubble Tea program and blocks until the user quits.
-// Returns the final model state.
-func RunTUI(audioIn, audioOut, midiIn []string) (model, error) {
-	m := newModel(audioIn, audioOut, midiIn)
+// It initialises audio/MIDI streams from the shared state, runs the TUI,
+// and cleans up on exit. Returns the final model state.
+func RunTUI(state *SharedState, audioIn, audioOut, midiIn []string) (model, error) {
+	m := newModel(state, audioIn, audioOut, midiIn)
+
+	// Start initial audio and MIDI streams.
+	m.restartStreams()
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
+		m.stopStreams()
 		return m, fmt.Errorf("TUI error: %w", err)
 	}
 	return m, nil

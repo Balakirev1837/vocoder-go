@@ -7,3 +7,9 @@ test-all:
 
 check:
 	cargo check --lib --no-default-features
+
+build-go:
+	go build ./...
+
+test-go:
+	go test ./... -v -count=1
