@@ -100,7 +100,7 @@ pub fn list_midi_input_ports() -> Result<Vec<String>> {
     let mut names = Vec::with_capacity(ports.len());
     for port in ports {
         let name = midi_in
-            .port_name(port)
+            .port_name(&port)
             .unwrap_or_else(|_| "unknown".to_string());
         names.push(name);
     }
