@@ -478,4 +478,290 @@ mod tests {
             }
         );
     }
+
+    // --- Edge cases & boundary values (MID-PA-01 .. MID-PA-11) ---
+
+    #[test]
+    fn parse_pitch_bend_min() {
+        // MID-PA-01: Pitch bend minimum value.
+        let event = parse_midi_message(&[0xE0, 0x00, 0x00]);
+        assert_eq!(
+            event,
+            MidiEvent::PitchBend {
+                channel: 0,
+                value: -8192
+            }
+        );
+    }
+
+    #[test]
+    fn parse_note_on_channel_15() {
+        // MID-PA-02
+        let event = parse_midi_message(&[0x9F, 60, 100]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOn {
+                channel: 15,
+                note: 60,
+                velocity: 100
+            }
+        );
+    }
+
+    #[test]
+    fn parse_note_off_channel_15() {
+        // MID-PA-03
+        let event = parse_midi_message(&[0x8F, 60, 0]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOff {
+                channel: 15,
+                note: 60,
+                velocity: 0
+            }
+        );
+    }
+
+    #[test]
+    fn parse_control_change_channel_15() {
+        // MID-PA-04
+        let event = parse_midi_message(&[0xBF, 7, 127]);
+        assert_eq!(
+            event,
+            MidiEvent::ControlChange {
+                channel: 15,
+                controller: 7,
+                value: 127
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pitch_bend_channel_15() {
+        // MID-PA-05
+        let event = parse_midi_message(&[0xEF, 0x00, 0x40]);
+        assert_eq!(
+            event,
+            MidiEvent::PitchBend {
+                channel: 15,
+                value: 0
+            }
+        );
+    }
+
+    #[test]
+    fn parse_program_change_is_unknown() {
+        // MID-PA-06: Two-byte Program Change is not a handled voice message.
+        let event = parse_midi_message(&[0xC0, 5]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_channel_pressure_is_unknown() {
+        // MID-PA-07: Two-byte Channel Pressure is not handled.
+        let event = parse_midi_message(&[0xD1, 100]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_sysex_start_is_unknown() {
+        // MID-PA-08: SysEx start (system message) → Unknown.
+        let event = parse_midi_message(&[0xF0, 0x01, 0x02]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_realtime_clock_is_unknown() {
+        // MID-PA-09: Real-time Clock byte → Unknown.
+        let event = parse_midi_message(&[0xF8]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_active_sensing_is_unknown() {
+        // MID-PA-10: Active Sensing byte → Unknown.
+        let event = parse_midi_message(&[0xFE]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_song_position_pointer_is_unknown() {
+        // MID-PA-11: Song Position Pointer (system common) → Unknown.
+        let event = parse_midi_message(&[0xF2, 0x00, 0x00]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    // --- Malformed & corrupted input (MID-PA-12 .. MID-PA-19) ---
+
+    #[test]
+    fn parse_corrupted_data_bytes_no_panic() {
+        // MID-PA-12: Data bytes >= 0x80 are technically invalid but must not panic.
+        let event = parse_midi_message(&[0x90, 0x80, 0x90]);
+        // Parser accepts these as-is; just verify no panic and a recognised variant.
+        assert!(matches!(event, MidiEvent::NoteOn { .. }));
+    }
+
+    #[test]
+    fn parse_truncated_voice_message_2_bytes() {
+        // MID-PA-13: Only 2 bytes (status + 1 data) → Unknown (need 3 for voice).
+        let event = parse_midi_message(&[0x90, 60]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_single_status_byte() {
+        // MID-PA-14: Only a status byte → Unknown (no data bytes).
+        let event = parse_midi_message(&[0x90]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_all_zeros() {
+        // MID-PA-15: 0x00 is not a recognised status byte → Unknown.
+        let event = parse_midi_message(&[0x00, 0x00, 0x00]);
+        assert_eq!(event, MidiEvent::Unknown);
+    }
+
+    #[test]
+    fn parse_note_on_velocity_zero_nonzero_channel() {
+        // MID-PA-16: NoteOn velocity 0 on channel 1 → NoteOff.
+        let event = parse_midi_message(&[0x91, 64, 0]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOff {
+                channel: 1,
+                note: 64,
+                velocity: 0
+            }
+        );
+    }
+
+    #[test]
+    fn parse_note_on_note_zero() {
+        // MID-PA-17: Lowest note number.
+        let event = parse_midi_message(&[0x90, 0, 100]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 0,
+                velocity: 100
+            }
+        );
+    }
+
+    #[test]
+    fn parse_note_on_note_127() {
+        // MID-PA-18: Highest note number.
+        let event = parse_midi_message(&[0x90, 127, 100]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 127,
+                velocity: 100
+            }
+        );
+    }
+
+    #[test]
+    fn parse_note_on_velocity_127() {
+        // MID-PA-19: Maximum velocity.
+        let event = parse_midi_message(&[0x90, 60, 127]);
+        assert_eq!(
+            event,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 127
+            }
+        );
+    }
+
+    // --- Property-based tests (MID-PB-01 .. MID-PB-03) ---
+
+    proptest::proptest! {
+        /// MID-PB-01: Round-trip channel preservation.
+        /// For any valid NoteOn/NoteOff/CC/PitchBend message the parsed channel
+        /// must equal `status & 0x0F`.
+        #[test]
+        fn prop_channel_preservation(
+            mt_idx in 0u8..4u8,
+            channel in 0u8..=15u8,
+            d1 in 0u8..=127u8,
+            d2 in 0u8..=127u8,
+        ) {
+            let msg_type = [0x80u8, 0x90, 0xB0, 0xE0][mt_idx as usize];
+            let status = msg_type | channel;
+            let event = parse_midi_message(&[status, d1, d2]);
+            match event {
+                MidiEvent::NoteOn { channel: ch, .. }
+                | MidiEvent::NoteOff { channel: ch, .. }
+                | MidiEvent::ControlChange { channel: ch, .. }
+                | MidiEvent::PitchBend { channel: ch, .. } => {
+                    assert_eq!(ch, channel);
+                }
+                MidiEvent::Unknown => {
+                    // Only expected for NoteOn vel==0 edge case that somehow
+                    // isn't caught — should not happen for the selected msg types.
+                    panic!("Expected recognised event for status 0x{:02X}", status);
+                }
+            }
+        }
+
+        /// MID-PB-02: No-panic guarantee.
+        /// `parse_midi_message()` must not panic for any arbitrary byte slice.
+        #[test]
+        fn prop_no_panic(data in proptest::collection::vec(proptest::num::u8::ANY, 0..=4usize)) {
+            let _ = parse_midi_message(&data);
+        }
+
+        /// MID-PB-03: Pitch bend range.
+        /// For any valid LSB/MSB the resulting value must be in [-8192, 8191].
+        #[test]
+        fn prop_pitch_bend_range(lsb in 0u8..=127u8, msb in 0u8..=127u8) {
+            let event = parse_midi_message(&[0xE0, lsb, msb]);
+            match event {
+                MidiEvent::PitchBend { value, .. } => {
+                    assert!(
+                        (-8192..=8191).contains(&value),
+                        "value {} out of range for lsb={} msb={}",
+                        value, lsb, msb
+                    );
+                }
+                _ => panic!("Expected PitchBend event"),
+            }
+        }
+
+        /// PROP-05: Valid NoteOn round-trip.
+        /// For any NoteOn with velocity > 0 the result is NoteOn with correct fields.
+        #[test]
+        fn prop_valid_note_on(
+            channel in 0u8..=15u8,
+            note in 0u8..=127u8,
+            velocity in 1u8..=127u8, // vel > 0 guarantees NoteOn
+        ) {
+            let status = 0x90 | channel;
+            let event = parse_midi_message(&[status, note, velocity]);
+            assert_eq!(
+                event,
+                MidiEvent::NoteOn { channel, note, velocity }
+            );
+        }
+
+        /// PROP-06: Valid NoteOff round-trip.
+        #[test]
+        fn prop_valid_note_off(
+            channel in 0u8..=15u8,
+            note in 0u8..=127u8,
+            velocity in 0u8..=127u8,
+        ) {
+            let status = 0x80 | channel;
+            let event = parse_midi_message(&[status, note, velocity]);
+            assert_eq!(
+                event,
+                MidiEvent::NoteOff { channel, note, velocity }
+            );
+        }
+    }
 }

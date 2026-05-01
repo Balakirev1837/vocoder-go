@@ -15,3 +15,6 @@ midir = { version = "0.10", optional = true }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 anyhow = "1"
+
+[dev-dependencies]
+proptest = "1"
