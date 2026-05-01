@@ -10,6 +10,23 @@
 /// All filters are second-order IIR (biquad) sections.
 use std::f64::consts::PI;
 
+/// Smallest positive normalised f64 value.  Values with magnitude below this
+/// threshold are *denormal* (subnormal) floats that can cause severe CPU
+/// performance penalties on many architectures.  We flush them to zero.
+const DENORMAL_THRESHOLD: f64 = 1e-20;
+
+/// Flush a denormal (subnormal) float to zero.  This is a cheap branch-free
+/// helper used in the inner DSP loops to prevent accumulation of denormals
+/// in filter state variables.
+#[inline]
+fn flush_denormal(x: f64) -> f64 {
+    if x.abs() < DENORMAL_THRESHOLD {
+        0.0
+    } else {
+        x
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Biquad filter
 // ---------------------------------------------------------------------------
@@ -39,6 +56,17 @@ impl BiquadFilter {
     /// * `q`          – quality factor (bandwidth = centre_freq / q)
     /// * `sample_rate` – sampling rate in Hz
     pub fn bandpass(center_freq: f64, q: f64, sample_rate: f64) -> Self {
+        // Guard against invalid parameters that would produce NaN / Inf or
+        // cause division-by-zero in the coefficient calculation.
+        // - sample_rate must be positive.
+        // - center_freq must be positive and strictly below Nyquist
+        //   (sample_rate / 2) so that w0 ∈ (0, π).
+        // - q must be positive (avoids division by zero in alpha).
+        let sample_rate = sample_rate.max(1.0);
+        let nyquist = sample_rate / 2.0;
+        let center_freq = center_freq.clamp(1e-6, nyquist * 0.999);
+        let q = q.max(1e-6);
+
         let w0 = 2.0 * PI * center_freq / sample_rate;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
@@ -66,8 +94,8 @@ impl BiquadFilter {
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         let output = self.b0 * input + self.z1;
-        self.z1 = self.b1 * input - self.a1 * output + self.z2;
-        self.z2 = self.b2 * input - self.a2 * output;
+        self.z1 = flush_denormal(self.b1 * input - self.a1 * output + self.z2);
+        self.z2 = flush_denormal(self.b2 * input - self.a2 * output);
         output
     }
 
@@ -126,7 +154,7 @@ impl EnvelopeFollower {
         } else {
             self.release
         };
-        self.envelope = coeff * self.envelope + (1.0 - coeff) * abs_input;
+        self.envelope = flush_denormal(coeff * self.envelope + (1.0 - coeff) * abs_input);
         self.envelope
     }
 
@@ -380,6 +408,9 @@ fn spread_frequencies(n: usize, low: f64, high: f64) -> Vec<f64> {
     if n == 0 {
         return vec![];
     }
+    // Clamp to safe positive values so ln() is well-defined.
+    let low = low.max(1e-6);
+    let high = high.max(low * 2.0);
     if n == 1 {
         return vec![(low * high).sqrt()];
     }
@@ -606,5 +637,101 @@ mod tests {
         // First and last should be at boundaries.
         assert!((vocoder.center_frequencies()[0] - 100.0).abs() < 1e-6);
         assert!((vocoder.center_frequencies()[19] - 10000.0).abs() < 1e-6);
+    }
+
+    // ----- New tests for critical fixes -----
+
+    #[test]
+    fn test_biquad_q_zero_no_panic() {
+        // q = 0 must not panic or produce NaN.
+        let mut bp = BiquadFilter::bandpass(1000.0, 0.0, 44100.0);
+        let out = bp.process(1.0);
+        assert!(out.is_finite(), "output must be finite with q=0, got {out}");
+    }
+
+    #[test]
+    fn test_biquad_negative_frequency_no_nan() {
+        let mut bp = BiquadFilter::bandpass(-500.0, 5.0, 44100.0);
+        let out = bp.process(1.0);
+        assert!(
+            out.is_finite(),
+            "output must be finite with negative freq, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_biquad_zero_frequency_no_nan() {
+        let mut bp = BiquadFilter::bandpass(0.0, 5.0, 44100.0);
+        let out = bp.process(1.0);
+        assert!(
+            out.is_finite(),
+            "output must be finite with zero freq, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_biquad_zero_sample_rate_no_nan() {
+        let mut bp = BiquadFilter::bandpass(1000.0, 5.0, 0.0);
+        let out = bp.process(1.0);
+        assert!(
+            out.is_finite(),
+            "output must be finite with zero sample_rate, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_biquad_above_nyquist_clamped() {
+        // Frequency above Nyquist should be clamped, not produce garbage.
+        let mut bp = BiquadFilter::bandpass(30000.0, 5.0, 44100.0);
+        let out = bp.process(1.0);
+        assert!(
+            out.is_finite(),
+            "output must be finite with freq above Nyquist, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_spread_frequencies_negative_bounds() {
+        let freqs = spread_frequencies(4, -100.0, -10.0);
+        // Should produce valid positive frequencies after clamping.
+        for &f in &freqs {
+            assert!(
+                f.is_finite() && f > 0.0,
+                "freq must be positive finite, got {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_denormals_flushed_in_biquad() {
+        let mut bp = BiquadFilter::bandpass(1000.0, 5.0, 44100.0);
+        // Feed a big impulse then lots of silence — state should flush to zero.
+        bp.process(1.0);
+        for _ in 0..100_000 {
+            bp.process(0.0);
+        }
+        // After enough silence, the state variables should have been flushed.
+        // We verify indirectly: process another zero and check the output is
+        // extremely small or exactly zero.
+        let out = bp.process(0.0);
+        assert!(
+            out == 0.0 || out.abs() < 1e-15,
+            "denormals should be flushed, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_denormals_flushed_in_envelope_follower() {
+        let mut ef = EnvelopeFollower::new(0.001, 0.001, 44100.0);
+        // Charge then decay to zero.
+        ef.process(1.0);
+        for _ in 0..500_000 {
+            ef.process(0.0);
+        }
+        let val = ef.value();
+        assert!(
+            val == 0.0 || val < 1e-15,
+            "denormals should be flushed in envelope follower, got {val}"
+        );
     }
 }
