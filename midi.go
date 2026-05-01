@@ -86,10 +86,7 @@ func ListInputPorts() ([]string, error) {
 	}
 	defer drv.Close()
 
-	ins, err := midi.GetInPorts()
-	if err != nil {
-		return nil, fmt.Errorf("listing MIDI input ports: %w", err)
-	}
+	ins := midi.GetInPorts()
 
 	names := make([]string, 0, len(ins))
 	for _, in := range ins {
@@ -110,11 +107,7 @@ func ListenToPort(portName string, active *ActiveNotes) (stop func(), err error)
 		return nil, fmt.Errorf("creating MIDI driver: %w", err)
 	}
 
-	ins, err := midi.GetInPorts()
-	if err != nil {
-		drv.Close()
-		return nil, fmt.Errorf("listing MIDI input ports: %w", err)
-	}
+	ins := midi.GetInPorts()
 
 	// Find the port with the matching name.
 	var targetIdx = -1

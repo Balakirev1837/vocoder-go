@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+// isFinite reports whether x is neither NaN nor an infinity.
+func isFinite(x float64) bool {
+	return !math.IsNaN(x) && !math.IsInf(x, 0)
+}
+
 // ---------------------------------------------------------------------------
 // spreadFrequencies tests
 // ---------------------------------------------------------------------------
@@ -50,7 +55,7 @@ func TestSpreadFrequenciesEmpty(t *testing.T) {
 func TestSpreadFrequenciesLowZero(t *testing.T) {
 	freqs := spreadFrequencies(4, 0.0, 1000.0)
 	for _, f := range freqs {
-		if !math.IsFinite(f) || f <= 0.0 {
+		if !isFinite(f) || f <= 0.0 {
 			t.Errorf("frequency must be finite and positive, got %f", f)
 		}
 	}
@@ -59,7 +64,7 @@ func TestSpreadFrequenciesLowZero(t *testing.T) {
 func TestSpreadFrequenciesNegativeBounds(t *testing.T) {
 	freqs := spreadFrequencies(4, -100.0, -10.0)
 	for _, f := range freqs {
-		if !math.IsFinite(f) || f <= 0.0 {
+		if !isFinite(f) || f <= 0.0 {
 			t.Errorf("frequency must be finite and positive, got %f", f)
 		}
 	}
@@ -126,7 +131,7 @@ func TestBiquadReset(t *testing.T) {
 func TestBiquadQZeroNoPanic(t *testing.T) {
 	bp := NewBandpass(1000.0, 0.0, 44100.0)
 	out := bp.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("output must be finite with q=0, got %f", out)
 	}
 }
@@ -134,7 +139,7 @@ func TestBiquadQZeroNoPanic(t *testing.T) {
 func TestBiquadNegativeFrequencyNoNaN(t *testing.T) {
 	bp := NewBandpass(-500.0, 5.0, 44100.0)
 	out := bp.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("output must be finite with negative freq, got %f", out)
 	}
 }
@@ -142,7 +147,7 @@ func TestBiquadNegativeFrequencyNoNaN(t *testing.T) {
 func TestBiquadZeroFrequencyNoNaN(t *testing.T) {
 	bp := NewBandpass(0.0, 5.0, 44100.0)
 	out := bp.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("output must be finite with zero freq, got %f", out)
 	}
 }
@@ -150,7 +155,7 @@ func TestBiquadZeroFrequencyNoNaN(t *testing.T) {
 func TestBiquadZeroSampleRateNoNaN(t *testing.T) {
 	bp := NewBandpass(1000.0, 5.0, 0.0)
 	out := bp.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("output must be finite with zero sample_rate, got %f", out)
 	}
 }
@@ -158,7 +163,7 @@ func TestBiquadZeroSampleRateNoNaN(t *testing.T) {
 func TestBiquadAboveNyquistClamped(t *testing.T) {
 	bp := NewBandpass(30000.0, 5.0, 44100.0)
 	out := bp.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("output must be finite with freq above Nyquist, got %f", out)
 	}
 }
@@ -297,7 +302,7 @@ func TestEnvelopeFollowerMonotonicNonDecreasing(t *testing.T) {
 func TestEnvelopeFollowerNegativeAttackTime(t *testing.T) {
 	ef := NewEnvelopeFollower(-0.001, 0.05, 44100.0)
 	out := ef.Process(1.0)
-	if !math.IsFinite(out) {
+	if !isFinite(out) {
 		t.Errorf("envelope must be finite, got %f", out)
 	}
 	if out <= 0.0 {
@@ -440,7 +445,7 @@ func TestVocoderFiniteOutput(t *testing.T) {
 		seed = seed*6364136223846793005 + 1
 		carrier := float64(int64(seed>>33)) / float64(int64(0x7FFFFFFFFFFFFFFF))
 		out := v.Process(modulator, carrier)
-		if !math.IsFinite(out) {
+		if !isFinite(out) {
 			t.Fatalf("output must be finite at sample %d, got %f", i, out)
 		}
 	}
