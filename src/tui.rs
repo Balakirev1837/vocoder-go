@@ -621,3 +621,334 @@ pub fn run(app: App) -> Result<App> {
 
     Ok(app)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    // Helper: construct a key-press event.
+    fn key_press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    // Helper: construct a key-release event (non-press).
+    fn key_release(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        ))
+    }
+
+    // --- TUI-CF: Config::default() tests ---
+
+    /// TUI-CF-01: Default config values.
+    #[test]
+    fn config_default_values() {
+        let cfg = Config::default();
+        assert_eq!(cfg.sample_rate, 44_100);
+        assert_eq!(cfg.buffer_size, 512);
+        assert_eq!(cfg.midi_channel, 1);
+        assert!((cfg.formant_shift - 1.0).abs() < 1e-6);
+        assert!((cfg.pitch_shift - 0.0).abs() < 1e-6);
+        assert!((cfg.gain - 0.8).abs() < 1e-6);
+    }
+
+    /// TUI-CF-02: Default devices are None.
+    #[test]
+    fn config_default_devices_none() {
+        let cfg = Config::default();
+        assert!(cfg.audio_input_device.is_none());
+        assert!(cfg.audio_output_device.is_none());
+        assert!(cfg.midi_input_port.is_none());
+    }
+
+    // --- TUI-AD: ConfigField::adjust() boundary tests ---
+
+    /// TUI-AD-01: SampleRate clamps at minimum (22050).
+    #[test]
+    fn adjust_sample_rate_clamp_min() {
+        let mut cfg = Config::default();
+        cfg.sample_rate = 22_050;
+        ConfigField::SampleRate.adjust(&mut cfg, -1);
+        assert_eq!(cfg.sample_rate, 22_050);
+    }
+
+    /// TUI-AD-02: SampleRate clamps at maximum (96000).
+    #[test]
+    fn adjust_sample_rate_clamp_max() {
+        let mut cfg = Config::default();
+        cfg.sample_rate = 96_000;
+        ConfigField::SampleRate.adjust(&mut cfg, 1);
+        assert_eq!(cfg.sample_rate, 96_000);
+    }
+
+    /// TUI-AD-03: BufferSize clamps at 128 (min) and 2048 (max).
+    #[test]
+    fn adjust_buffer_size_clamps() {
+        let mut cfg = Config::default();
+        cfg.buffer_size = 128;
+        ConfigField::BufferSize.adjust(&mut cfg, -1);
+        assert_eq!(cfg.buffer_size, 128);
+
+        cfg.buffer_size = 2048;
+        ConfigField::BufferSize.adjust(&mut cfg, 1);
+        assert_eq!(cfg.buffer_size, 2048);
+    }
+
+    /// TUI-AD-04: MidiChannel clamps at 1 (min) and 16 (max).
+    #[test]
+    fn adjust_midi_channel_clamps() {
+        let mut cfg = Config::default();
+        cfg.midi_channel = 1;
+        ConfigField::MidiChannel.adjust(&mut cfg, -1);
+        assert_eq!(cfg.midi_channel, 1);
+
+        cfg.midi_channel = 16;
+        ConfigField::MidiChannel.adjust(&mut cfg, 1);
+        assert_eq!(cfg.midi_channel, 16);
+    }
+
+    /// TUI-AD-05: FormantShift clamps at 0.25 (min) and 4.0 (max).
+    #[test]
+    fn adjust_formant_shift_clamps() {
+        let mut cfg = Config::default();
+        cfg.formant_shift = 0.25;
+        ConfigField::FormantShift.adjust(&mut cfg, -1);
+        assert!((cfg.formant_shift - 0.25).abs() < 1e-6);
+
+        cfg.formant_shift = 4.0;
+        ConfigField::FormantShift.adjust(&mut cfg, 1);
+        assert!((cfg.formant_shift - 4.0).abs() < 1e-6);
+    }
+
+    /// TUI-AD-06: PitchShift clamps at -24.0 (min) and 24.0 (max).
+    #[test]
+    fn adjust_pitch_shift_clamps() {
+        let mut cfg = Config::default();
+        cfg.pitch_shift = -24.0;
+        ConfigField::PitchShift.adjust(&mut cfg, -1);
+        assert!((cfg.pitch_shift - (-24.0)).abs() < 1e-6);
+
+        cfg.pitch_shift = 24.0;
+        ConfigField::PitchShift.adjust(&mut cfg, 1);
+        assert!((cfg.pitch_shift - 24.0).abs() < 1e-6);
+    }
+
+    /// TUI-AD-07: Gain clamps at 0.0 (min) and 1.5 (max).
+    #[test]
+    fn adjust_gain_clamps() {
+        let mut cfg = Config::default();
+        cfg.gain = 0.0;
+        ConfigField::Gain.adjust(&mut cfg, -1);
+        assert!((cfg.gain - 0.0).abs() < 1e-6);
+
+        cfg.gain = 1.5;
+        ConfigField::Gain.adjust(&mut cfg, 1);
+        assert!((cfg.gain - 1.5).abs() < 1e-6);
+    }
+
+    /// TUI-AD-08: FormantShift step size is 0.05.
+    #[test]
+    fn adjust_formant_shift_step_size() {
+        let mut cfg = Config::default();
+        cfg.formant_shift = 1.0;
+        ConfigField::FormantShift.adjust(&mut cfg, 1);
+        assert!((cfg.formant_shift - 1.05).abs() < 1e-6);
+    }
+
+    /// TUI-AD-09: PitchShift step size is 0.5.
+    #[test]
+    fn adjust_pitch_shift_step_size() {
+        let mut cfg = Config::default();
+        cfg.pitch_shift = 0.0;
+        ConfigField::PitchShift.adjust(&mut cfg, 1);
+        assert!((cfg.pitch_shift - 0.5).abs() < 1e-6);
+    }
+
+    // --- TUI-CD: cycle_device tests ---
+
+    /// TUI-CD-01: Empty device list — no panic, current unchanged.
+    #[test]
+    fn cycle_device_empty_list() {
+        let mut current = Some("device".to_string());
+        App::cycle_device(&mut current, &[], 1);
+        assert_eq!(current, Some("device".to_string()));
+    }
+
+    /// TUI-CD-02: Single device — cycling stays on same device.
+    #[test]
+    fn cycle_device_single() {
+        let devices = vec!["only".to_string()];
+        let mut current = Some("only".to_string());
+        App::cycle_device(&mut current, &devices, 1);
+        assert_eq!(current, Some("only".to_string()));
+        App::cycle_device(&mut current, &devices, -1);
+        assert_eq!(current, Some("only".to_string()));
+    }
+
+    /// TUI-CD-03: Wrap-around forward.
+    #[test]
+    fn cycle_device_wrap_forward() {
+        let devices = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut current = Some("c".to_string());
+        App::cycle_device(&mut current, &devices, 1);
+        assert_eq!(current, Some("a".to_string()));
+    }
+
+    /// TUI-CD-04: Wrap-around backward.
+    #[test]
+    fn cycle_device_wrap_backward() {
+        let devices = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut current = Some("a".to_string());
+        App::cycle_device(&mut current, &devices, -1);
+        assert_eq!(current, Some("c".to_string()));
+    }
+
+    /// TUI-CD-05: current is None and devices are available — idx starts at 0,
+    /// then delta is applied, so delta=1 yields index 1 ("b").
+    #[test]
+    fn cycle_device_none_selects_device() {
+        let devices = vec!["a".to_string(), "b".to_string()];
+        let mut current = None;
+        App::cycle_device(&mut current, &devices, 1);
+        assert_eq!(current, Some("b".to_string()));
+    }
+
+    /// TUI-CD-06: current names a device not in the list — falls back to index 0.
+    #[test]
+    fn cycle_device_missing_falls_back() {
+        let devices = vec!["a".to_string(), "b".to_string()];
+        let mut current = Some("z".to_string());
+        App::cycle_device(&mut current, &devices, 1);
+        assert_eq!(current, Some("b".to_string()));
+    }
+
+    // --- TUI-HE: handle_event tests ---
+
+    /// TUI-HE-01: 'q' sets should_quit = true.
+    #[test]
+    fn handle_event_quit_q() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        assert!(!app.should_quit);
+        app.handle_event(&key_press(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    /// TUI-HE-02: Esc sets should_quit = true.
+    #[test]
+    fn handle_event_quit_esc() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        app.handle_event(&key_press(KeyCode::Esc));
+        assert!(app.should_quit);
+    }
+
+    /// TUI-HE-03: Up decrements selected_field (bounded at 0).
+    #[test]
+    fn handle_event_up_decrements() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        app.selected_field = 2;
+        app.handle_event(&key_press(KeyCode::Up));
+        assert_eq!(app.selected_field, 1);
+        // Bounded at 0
+        app.selected_field = 0;
+        app.handle_event(&key_press(KeyCode::Up));
+        assert_eq!(app.selected_field, 0);
+    }
+
+    /// TUI-HE-04: Down increments selected_field (bounded at last field).
+    #[test]
+    fn handle_event_down_increments() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        assert_eq!(app.selected_field, 0);
+        app.handle_event(&key_press(KeyCode::Down));
+        assert_eq!(app.selected_field, 1);
+        // Bounded at CONFIG_FIELDS.len() - 1
+        app.selected_field = CONFIG_FIELDS.len() - 1;
+        app.handle_event(&key_press(KeyCode::Down));
+        assert_eq!(app.selected_field, CONFIG_FIELDS.len() - 1);
+    }
+
+    /// TUI-HE-05: 'k' acts like Up, 'j' acts like Down.
+    #[test]
+    fn handle_event_vim_up_down() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        app.selected_field = 1;
+        app.handle_event(&key_press(KeyCode::Char('k')));
+        assert_eq!(app.selected_field, 0);
+
+        app.handle_event(&key_press(KeyCode::Char('j')));
+        assert_eq!(app.selected_field, 1);
+    }
+
+    /// TUI-HE-06: 'h' acts like Left, 'l' acts like Right.
+    #[test]
+    fn handle_event_vim_left_right() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        // Select SampleRate field (index 3) to test value adjustment
+        app.selected_field = 3;
+        let initial_sr = app.config.sample_rate;
+        app.handle_event(&key_press(KeyCode::Char('l')));
+        assert_ne!(app.config.sample_rate, initial_sr);
+        app.handle_event(&key_press(KeyCode::Char('h')));
+        assert_eq!(app.config.sample_rate, initial_sr);
+    }
+
+    /// TUI-HE-07: Non-press key events are ignored.
+    #[test]
+    fn handle_event_release_ignored() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        app.handle_event(&key_release(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+    }
+
+    /// TUI-HE-08: Unmapped keys are ignored without side effects.
+    #[test]
+    fn handle_event_unmapped_key() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        let config_before = app.config.clone();
+        app.handle_event(&key_press(KeyCode::Char('x')));
+        assert_eq!(app.config.sample_rate, config_before.sample_rate);
+        assert_eq!(app.selected_field, 0);
+        assert!(!app.should_quit);
+    }
+
+    // --- TUI-DV: label() and display_value() tests ---
+
+    /// TUI-DV-01: Every ConfigField variant has a non-empty label.
+    #[test]
+    fn all_fields_have_nonempty_label() {
+        for field in &CONFIG_FIELDS {
+            assert!(!field.label().is_empty(), "label for {:?} is empty", field);
+        }
+    }
+
+    /// TUI-DV-02: display_value() produces a non-empty string for default config.
+    #[test]
+    fn display_value_nonempty_for_default() {
+        let cfg = Config::default();
+        for field in &CONFIG_FIELDS {
+            let val = field.display_value(&cfg);
+            assert!(!val.is_empty(), "display_value for {:?} is empty", field);
+        }
+    }
+
+    /// TUI-DV-03: display_value() for device fields shows "(default)" when None.
+    #[test]
+    fn display_value_device_default() {
+        let cfg = Config::default();
+        assert_eq!(
+            ConfigField::AudioInputDevice.display_value(&cfg),
+            "(default)"
+        );
+        assert_eq!(
+            ConfigField::AudioOutputDevice.display_value(&cfg),
+            "(default)"
+        );
+        assert_eq!(
+            ConfigField::MidiInputPort.display_value(&cfg),
+            "(first available)"
+        );
+    }
+}

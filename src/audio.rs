@@ -252,7 +252,7 @@ fn build_input_stream(
                         .unwrap_or_else(|| vec![Vec::new(); channels as usize])
                 };
                 // Convert i16 → f32 and deinterleave directly into the block
-                deinterleave_into(data, channels, &mut block, |s: i16| s as f32 / 32768.0);
+                deinterleave_into(data, channels, &mut block, i16_to_f32);
                 let mut guard = shared.lock().unwrap();
                 guard.recycle = guard.latest.take();
                 guard.latest = Some(block);
@@ -271,9 +271,7 @@ fn build_input_stream(
                         .unwrap_or_else(|| vec![Vec::new(); channels as usize])
                 };
                 // Convert u16 → f32 and deinterleave directly into the block
-                deinterleave_into(data, channels, &mut block, |s: u16| {
-                    (s as f32 - 32768.0) / 32768.0
-                });
+                deinterleave_into(data, channels, &mut block, u16_to_f32);
                 let mut guard = shared.lock().unwrap();
                 guard.recycle = guard.latest.take();
                 guard.latest = Some(block);
@@ -324,7 +322,7 @@ fn build_output_stream(
                     f32_buf.resize(data.len(), 0.0);
                     process(input_block.as_ref(), &mut f32_buf, channels);
                     for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
-                        *out = (*s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                        *out = f32_to_i16(*s);
                     }
                     if let Some(block) = input_block {
                         shared.lock().unwrap().recycle = Some(block);
@@ -344,7 +342,7 @@ fn build_output_stream(
                     f32_buf.resize(data.len(), 0.0);
                     process(input_block.as_ref(), &mut f32_buf, channels);
                     for (out, s) in data.iter_mut().zip(f32_buf.iter()) {
-                        *out = (*s * 32768.0 + 32768.0).clamp(0.0, 65535.0) as u16;
+                        *out = f32_to_u16(*s);
                     }
                     if let Some(block) = input_block {
                         shared.lock().unwrap().recycle = Some(block);
@@ -358,6 +356,26 @@ fn build_output_stream(
     };
 
     Ok(stream)
+}
+
+/// Convert an i16 sample to f32 in the [-1.0, ~1.0) range.
+fn i16_to_f32(s: i16) -> f32 {
+    s as f32 / 32768.0
+}
+
+/// Convert a u16 sample to f32 in the [-1.0, ~1.0) range.
+fn u16_to_f32(s: u16) -> f32 {
+    (s as f32 - 32768.0) / 32768.0
+}
+
+/// Convert an f32 sample in [-1.0, 1.0] to i16.
+fn f32_to_i16(s: f32) -> i16 {
+    (s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+/// Convert an f32 sample in [-1.0, 1.0] to u16.
+fn f32_to_u16(s: f32) -> u16 {
+    (s * 32768.0 + 32768.0).clamp(0.0, 65535.0) as u16
 }
 
 /// Writes interleaved samples into a pre-allocated `AudioBlock`, applying
@@ -393,6 +411,8 @@ fn deinterleave(interleaved: &[f32], channels: u16) -> AudioBlock {
 mod tests {
     use super::*;
 
+    // --- AUD-DI: deinterleave tests ---
+
     #[test]
     fn deinterleave_stereo() {
         let interleaved = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -410,6 +430,119 @@ mod tests {
         assert_eq!(block[0], vec![10.0, 20.0, 30.0]);
     }
 
+    /// AUD-DI-01: Empty input with 2 channels returns 2 empty Vecs.
+    #[test]
+    fn deinterleave_empty_input() {
+        let block = deinterleave(&[], 2);
+        assert_eq!(block.len(), 2);
+        assert!(block[0].is_empty());
+        assert!(block[1].is_empty());
+    }
+
+    /// AUD-DI-02: Single frame stereo.
+    #[test]
+    fn deinterleave_single_frame_stereo() {
+        let block = deinterleave(&[1.0, 2.0], 2);
+        assert_eq!(block, vec![vec![1.0], vec![2.0]]);
+    }
+
+    /// AUD-DI-03: Three channels deinterleaving.
+    #[test]
+    fn deinterleave_three_channels() {
+        let block = deinterleave(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3);
+        assert_eq!(block, vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]]);
+    }
+
+    /// AUD-DI-04: Channel count == 0 causes division by zero panic.
+    #[test]
+    #[should_panic]
+    fn deinterleave_zero_channels_panics() {
+        let _ = deinterleave(&[1.0, 2.0], 0);
+    }
+
+    /// AUD-DI-05: Round-trip — deinterleave then re-interleave produces original.
+    #[test]
+    fn deinterleave_round_trip() {
+        let original: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let block = deinterleave(&original, 2);
+        let mut reinterleaved = Vec::with_capacity(original.len());
+        let frames = block.first().map(|c| c.len()).unwrap_or(0);
+        for i in 0..frames {
+            for ch in &block {
+                reinterleaved.push(ch[i]);
+            }
+        }
+        assert_eq!(reinterleaved, original);
+    }
+
+    // --- AUD-SF: Sample format conversion tests ---
+
+    /// AUD-SF-01: I16 → f32: i16::MIN maps to -1.0.
+    #[test]
+    fn i16_to_f32_min() {
+        let result = i16_to_f32(i16::MIN);
+        assert!((result - (-1.0)).abs() < 1e-10);
+    }
+
+    /// AUD-SF-02: I16 → f32: i16::MAX maps to approximately 0.99997.
+    #[test]
+    fn i16_to_f32_max() {
+        let result = i16_to_f32(i16::MAX);
+        let expected = 32767.0_f32 / 32768.0;
+        assert!((result - expected).abs() < 1e-10);
+        assert!(result < 1.0);
+    }
+
+    /// AUD-SF-03: I16 → f32: 0 maps to 0.0.
+    #[test]
+    fn i16_to_f32_zero() {
+        assert_eq!(i16_to_f32(0), 0.0);
+    }
+
+    /// AUD-SF-04: U16 → f32: 0 maps to -1.0.
+    #[test]
+    fn u16_to_f32_zero() {
+        let result = u16_to_f32(0);
+        assert!((result - (-1.0)).abs() < 1e-10);
+    }
+
+    /// AUD-SF-05: U16 → f32: 32768 maps to 0.0.
+    #[test]
+    fn u16_to_f32_midpoint() {
+        let result = u16_to_f32(32768);
+        assert!((result - 0.0).abs() < 1e-10);
+    }
+
+    /// AUD-SF-06: U16 → f32: 65535 maps to approximately 0.99997.
+    #[test]
+    fn u16_to_f32_max() {
+        let result = u16_to_f32(65535);
+        let expected = (65535.0_f32 - 32768.0) / 32768.0;
+        assert!((result - expected).abs() < 1e-10);
+        assert!(result < 1.0);
+    }
+
+    /// AUD-SF-07: f32 → U16: -1.0 maps to 0.
+    #[test]
+    fn f32_to_u16_negative_one() {
+        assert_eq!(f32_to_u16(-1.0), 0);
+    }
+
+    /// AUD-SF-08: f32 → U16: 0.0 maps to 32768.
+    #[test]
+    fn f32_to_u16_zero() {
+        assert_eq!(f32_to_u16(0.0), 32768);
+    }
+
+    /// AUD-SF-09: f32 → U16: 1.0 maps to 65535.
+    #[test]
+    fn f32_to_u16_one() {
+        assert_eq!(f32_to_u16(1.0), 65535);
+    }
+
+    // --- AUD-CF: AudioIoConfig tests ---
+
+    /// AUD-CF-01: Default config has sample_rate and buffer_size as None.
     #[test]
     fn audio_io_config_default() {
         let cfg = AudioIoConfig::default();
