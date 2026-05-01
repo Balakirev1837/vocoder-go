@@ -14,6 +14,50 @@ pub struct DeviceInfo {
     pub name: String,
 }
 
+/// ALSA device name substrings that typically represent non-working or
+/// duplicate subdevices (e.g. surround40, front, iec958, dmix).  Any device
+/// whose name contains one of these substrings is excluded from the list
+/// returned to the caller.
+const ALSA_SKIP_PATTERNS: &[&str] = &[
+    "surround",
+    "front",
+    "iec958",
+    "dmix",
+    "dsnoop",
+    "null",
+    "file:",
+    "rate",
+    "speexrate",
+    "adapter",
+    "speex",
+];
+
+/// Returns `true` if the device name looks like a usable ALSA device.
+/// Devices whose names match a known non-working pattern are rejected.
+fn is_relevant_device_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !ALSA_SKIP_PATTERNS.iter().any(|pat| lower.contains(pat))
+}
+
+/// Removes duplicate devices by name, keeping the first occurrence.
+fn dedup_devices(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    let mut seen = std::collections::HashSet::new();
+    devices
+        .into_iter()
+        .filter(|d| seen.insert(d.name.clone()))
+        .collect()
+}
+
+/// Filter and deduplicate a raw device list so that only relevant, unique
+/// devices are returned.
+fn filter_devices(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    let filtered: Vec<DeviceInfo> = devices
+        .into_iter()
+        .filter(|d| is_relevant_device_name(&d.name))
+        .collect();
+    dedup_devices(filtered)
+}
+
 /// Returns a list of available audio input devices.
 pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
     let host = cpal::default_host();
@@ -26,7 +70,7 @@ pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
             list.push(DeviceInfo { name });
         }
     }
-    Ok(list)
+    Ok(filter_devices(list))
 }
 
 /// Returns a list of available audio output devices.
@@ -41,7 +85,7 @@ pub fn list_output_devices() -> Result<Vec<DeviceInfo>> {
             list.push(DeviceInfo { name });
         }
     }
-    Ok(list)
+    Ok(filter_devices(list))
 }
 
 /// Find an input device by name. Returns `Ok(device)` if found.
@@ -549,5 +593,116 @@ mod tests {
         let cfg = AudioIoConfig::default();
         assert!(cfg.sample_rate.is_none());
         assert!(cfg.buffer_size.is_none());
+    }
+
+    // --- AUD-FL: Audio device filtering tests ---
+
+    /// AUD-FL-01: is_relevant_device_name rejects surround devices.
+    #[test]
+    fn filter_rejects_surround() {
+        assert!(!is_relevant_device_name("surround40"));
+        assert!(!is_relevant_device_name("surround51"));
+        assert!(!is_relevant_device_name("Surround71"));
+    }
+
+    /// AUD-FL-02: is_relevant_device_name rejects front, iec958, dmix, dsnoop.
+    #[test]
+    fn filter_rejects_known_bad() {
+        assert!(!is_relevant_device_name("front"));
+        assert!(!is_relevant_device_name("iec958:CARD=Intel"));
+        assert!(!is_relevant_device_name("dmix:CARD=Intel"));
+        assert!(!is_relevant_device_name("dsnoop:CARD=Intel"));
+    }
+
+    /// AUD-FL-03: is_relevant_device_name keeps sysdefault, default, hw, usb, pulse, pipewire.
+    #[test]
+    fn filter_keeps_relevant() {
+        assert!(is_relevant_device_name("sysdefault:CARD=Intel"));
+        assert!(is_relevant_device_name("default"));
+        assert!(is_relevant_device_name("hw:CARD=Intel,DEV=0"));
+        assert!(is_relevant_device_name("usb:CARD=USB"));
+        assert!(is_relevant_device_name("pulse"));
+        assert!(is_relevant_device_name("pipewire"));
+    }
+
+    /// AUD-FL-04: dedup_devices removes duplicates, keeps first occurrence.
+    #[test]
+    fn dedup_removes_duplicates() {
+        let devices = vec![
+            DeviceInfo {
+                name: "default".into(),
+            },
+            DeviceInfo {
+                name: "hw:CARD=Intel".into(),
+            },
+            DeviceInfo {
+                name: "default".into(),
+            },
+        ];
+        let result = dedup_devices(devices);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "default");
+        assert_eq!(result[1].name, "hw:CARD=Intel");
+    }
+
+    /// AUD-FL-05: filter_devices combines filtering and dedup.
+    #[test]
+    fn filter_devices_combined() {
+        let devices = vec![
+            DeviceInfo {
+                name: "default".into(),
+            },
+            DeviceInfo {
+                name: "surround40".into(),
+            },
+            DeviceInfo {
+                name: "front".into(),
+            },
+            DeviceInfo {
+                name: "sysdefault:CARD=Intel".into(),
+            },
+            DeviceInfo {
+                name: "default".into(),
+            },
+        ];
+        let result = filter_devices(devices);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "default");
+        assert_eq!(result[1].name, "sysdefault:CARD=Intel");
+    }
+
+    /// AUD-FL-06: is_relevant_device_name rejects null, file:, rate, speexrate.
+    #[test]
+    fn filter_rejects_misc_bad() {
+        assert!(!is_relevant_device_name("null"));
+        assert!(!is_relevant_device_name("file:/tmp/out.wav"));
+        assert!(!is_relevant_device_name("rate_converter"));
+        assert!(!is_relevant_device_name("speexrate"));
+    }
+
+    /// AUD-FL-07: dedup_devices on empty list returns empty.
+    #[test]
+    fn dedup_empty() {
+        let devices: Vec<DeviceInfo> = vec![];
+        let result = dedup_devices(devices);
+        assert!(result.is_empty());
+    }
+
+    /// AUD-FL-08: filter_devices on all-filtered returns empty.
+    #[test]
+    fn filter_all_removed() {
+        let devices = vec![
+            DeviceInfo {
+                name: "surround40".into(),
+            },
+            DeviceInfo {
+                name: "front".into(),
+            },
+            DeviceInfo {
+                name: "dmix:CARD=Intel".into(),
+            },
+        ];
+        let result = filter_devices(devices);
+        assert!(result.is_empty());
     }
 }
