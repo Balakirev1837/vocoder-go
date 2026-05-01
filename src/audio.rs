@@ -28,7 +28,6 @@ impl Default for AudioIoConfig {
 pub struct AudioIo {
     _input_stream: Stream,
     _output_stream: Stream,
-    config: StreamConfig,
 }
 
 impl AudioIo {
@@ -40,7 +39,7 @@ impl AudioIo {
     /// available yet) and must fill the output buffer.
     pub fn new(
         io_config: &AudioIoConfig,
-        mut process: impl FnMut(Option<&AudioBlock>, &mut [f32], u16) + Send + 'static,
+        process: impl FnMut(Option<&AudioBlock>, &mut [f32], u16) + Send + 'static,
     ) -> Result<Self> {
         let host = cpal::default_host();
 
@@ -68,13 +67,7 @@ impl AudioIo {
         Ok(Self {
             _input_stream: input_stream,
             _output_stream: output_stream,
-            config,
         })
-    }
-
-    /// Returns the active stream configuration (sample rate, channels, buffer).
-    pub fn config(&self) -> &StreamConfig {
-        &self.config
     }
 }
 

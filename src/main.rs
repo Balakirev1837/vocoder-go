@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
     // ── Run TUI with live status updates ─────────────────────────────
     #[cfg(feature = "tui")]
     {
-        use crossterm::event::{self, Event};
+        use crossterm::event;
         use crossterm::terminal::{
             disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
         };
