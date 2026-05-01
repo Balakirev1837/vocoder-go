@@ -305,13 +305,13 @@ mod tests {
 
     #[test]
     fn parse_pitch_bend_max() {
-        // MSB=0x7F, LSB=0x7F → 16256 - 8192 = 8064
+        // MSB=0x7F, LSB=0x7F → 16383 - 8192 = 8191
         let event = parse_midi_message(&[0xE0, 0x7F, 0x7F]);
         assert_eq!(
             event,
             MidiEvent::PitchBend {
                 channel: 0,
-                value: 8064
+                value: 8191
             }
         );
     }
@@ -424,7 +424,7 @@ mod tests {
             event,
             MidiEvent::PitchBend {
                 channel: 0,
-                value: 8064
+                value: 8191
             }
         );
     }
