@@ -401,6 +401,7 @@ fn deinterleave_into<T: Copy>(
 }
 
 /// Converts interleaved f32 samples into a per-channel `AudioBlock`.
+#[cfg(test)]
 fn deinterleave(interleaved: &[f32], channels: u16) -> AudioBlock {
     let mut block = Vec::new();
     deinterleave_into(interleaved, channels, &mut block, |s| s);

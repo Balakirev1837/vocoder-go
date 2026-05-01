@@ -149,6 +149,7 @@ impl MidiParser {
 ///
 /// This is a stateless convenience wrapper around [`parse_voice_message`].
 /// It does **not** handle running status; for that, use [`MidiParser`].
+#[cfg(test)]
 pub fn parse_midi_message(data: &[u8]) -> MidiEvent {
     if data.is_empty() {
         return MidiEvent::Unknown;
