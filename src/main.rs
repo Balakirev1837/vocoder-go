@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     // ── Start MIDI input ─────────────────────────────────────────────
     #[cfg(feature = "midi")]
-    let midi_handle = match midi::start_midi_input() {
+    let midi_handle = match midi::start_midi_input(None) {
         Ok(h) => Some(h),
         Err(e) => {
             eprintln!("MIDI: {}", e);
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
             buffer_size: Some(512),
         };
 
-        audio::AudioIo::new(&config, move |input_block, output, channels| {
+        audio::AudioIo::new(&config, None, None, move |input_block, output, channels| {
             let ch = channels as usize;
             let mod_samples: &[f32] = input_block
                 .and_then(|b| b.get(0))

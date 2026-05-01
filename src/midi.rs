@@ -91,11 +91,30 @@ pub fn parse_midi_message(data: &[u8]) -> MidiEvent {
     }
 }
 
-/// Connect to the first available MIDI input port and start receiving events.
+/// List the names of all available MIDI input ports.
+///
+/// Returns an empty vector when no ports are present.
+pub fn list_midi_input_ports() -> Result<Vec<String>> {
+    let midi_in = MidiInput::new("vocoder")?;
+    let ports = midi_in.ports();
+    let mut names = Vec::with_capacity(ports.len());
+    for port in ports {
+        let name = midi_in
+            .port_name(port)
+            .unwrap_or_else(|_| "unknown".to_string());
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// Connect to a MIDI input port and start receiving events.
+///
+/// If `port_name` is `Some(name)`, the port with the matching name is opened.
+/// If `port_name` is `None`, the first available input port is used.
 ///
 /// Events are sent over the channel returned inside [`MidiInputHandle`].
 /// Dropping the handle disconnects from the port.
-pub fn start_midi_input() -> Result<MidiInputHandle> {
+pub fn start_midi_input(port_name: Option<&str>) -> Result<MidiInputHandle> {
     let midi_in = MidiInput::new("vocoder")?;
     let ports = midi_in.ports();
 
@@ -103,9 +122,15 @@ pub fn start_midi_input() -> Result<MidiInputHandle> {
         return Err(anyhow!("No MIDI input ports available"));
     }
 
-    // Use the first available input port.
-    let port = &ports[0];
-    let port_name = midi_in
+    let port = match port_name {
+        Some(name) => ports
+            .iter()
+            .find(|p| midi_in.port_name(p).map(|n| n == name).unwrap_or(false))
+            .ok_or_else(|| anyhow!("MIDI input port '{}' not found", name))?,
+        None => &ports[0],
+    };
+
+    let resolved_name = midi_in
         .port_name(port)
         .unwrap_or_else(|_| "unknown".to_string());
 
@@ -114,7 +139,7 @@ pub fn start_midi_input() -> Result<MidiInputHandle> {
     let connection = midi_in
         .connect(
             port,
-            &port_name,
+            &resolved_name,
             move |_timestamp, data, _| {
                 let event = parse_midi_message(data);
                 // Ignore send errors — the receiver may have been dropped.
