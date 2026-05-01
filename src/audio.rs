@@ -7,6 +7,65 @@ use std::sync::mpsc::{self, Receiver, Sender};
 /// Each inner `Vec<f32>` is one channel's worth of samples.
 pub type AudioBlock = Vec<Vec<f32>>;
 
+/// Information about an available audio device.
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    /// The device name as reported by the host.
+    pub name: String,
+}
+
+/// Returns a list of available audio input devices.
+pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .context("could not enumerate input devices")?;
+    let mut list = Vec::new();
+    for device in devices {
+        if let Ok(name) = device.name() {
+            list.push(DeviceInfo { name });
+        }
+    }
+    Ok(list)
+}
+
+/// Returns a list of available audio output devices.
+pub fn list_output_devices() -> Result<Vec<DeviceInfo>> {
+    let host = cpal::default_host();
+    let devices = host
+        .output_devices()
+        .context("could not enumerate output devices")?;
+    let mut list = Vec::new();
+    for device in devices {
+        if let Ok(name) = device.name() {
+            list.push(DeviceInfo { name });
+        }
+    }
+    Ok(list)
+}
+
+/// Find an input device by name. Returns `Ok(device)` if found.
+fn find_input_device(name: &str) -> Result<Device> {
+    let host = cpal::default_host();
+    let mut devices = host
+        .input_devices()
+        .context("could not enumerate input devices")?;
+    devices
+        .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+        .with_context(|| format!("input device '{}' not found", name))
+}
+
+/// Find an output device by name. Returns `Ok(device)` if found.
+fn find_output_device(name: &str) -> Result<Device> {
+    let host = cpal::default_host();
+    let mut devices = host
+        .output_devices()
+        .context("could not enumerate output devices")?;
+    devices
+        .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+        .with_context(|| format!("output device '{}' not found", name))
+}
+
 /// Configuration for audio I/O tuned for low latency.
 pub struct AudioIoConfig {
     /// Preferred sample rate in Hz. `None` means use the device default.
@@ -31,24 +90,36 @@ pub struct AudioIo {
 }
 
 impl AudioIo {
-    /// Opens the default input and output devices and builds streams
-    /// configured for minimal latency.
+    /// Opens audio input and output devices and builds streams configured
+    /// for minimal latency.
+    ///
+    /// If `input_device_name` is `Some(name)`, the input device with that
+    /// name is used; otherwise the system default is used. The same applies
+    /// to `output_device_name`.
     ///
     /// The closure `process` is called on every output buffer. It receives
     /// the most-recently captured input block (or `None` if none is
     /// available yet) and must fill the output buffer.
     pub fn new(
         io_config: &AudioIoConfig,
+        input_device_name: Option<&str>,
+        output_device_name: Option<&str>,
         process: impl FnMut(Option<&AudioBlock>, &mut [f32], u16) + Send + 'static,
     ) -> Result<Self> {
         let host = cpal::default_host();
 
-        let input_device = host
-            .default_input_device()
-            .context("no input device available")?;
-        let output_device = host
-            .default_output_device()
-            .context("no output device available")?;
+        let input_device = match input_device_name {
+            Some(name) => find_input_device(name)?,
+            None => host
+                .default_input_device()
+                .context("no input device available")?,
+        };
+        let output_device = match output_device_name {
+            Some(name) => find_output_device(name)?,
+            None => host
+                .default_output_device()
+                .context("no output device available")?,
+        };
 
         let (config, sample_format) = build_low_latency_config(&output_device, io_config)?;
 
