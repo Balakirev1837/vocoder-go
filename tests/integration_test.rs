@@ -1319,7 +1319,7 @@ fn block_length_mismatch_safe() {
     vocoder.process_block(&modulator, &carrier, &mut output);
 
     // First 256 samples should be written (carrier has 512, only 256 used)
-    let written = output.iter().filter(|&&v| v != 0.0).count();
+    let _written = output.iter().filter(|&&v| v != 0.0).count();
     // Note: output may or may not be non-zero depending on envelope state,
     // but the call should not panic.
     assert_eq!(output.len(), 256, "output length should be preserved");
