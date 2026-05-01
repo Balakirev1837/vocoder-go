@@ -1,0 +1,6 @@
+mod audio;
+mod midi;
+
+fn main() {
+    println!("Hello, world!");
+}
