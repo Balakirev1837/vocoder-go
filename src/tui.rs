@@ -42,7 +42,7 @@ impl Default for Config {
             midi_channel: 1,
             formant_shift: 1.0,
             pitch_shift: 0.0,
-            gain: 3.0,
+            gain: 1.0,
             keyboard_mode: false,
         }
     }
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(cfg.midi_channel, 1);
         assert!((cfg.formant_shift - 1.0).abs() < 1e-6);
         assert!((cfg.pitch_shift - 0.0).abs() < 1e-6);
-        assert!((cfg.gain - 3.0).abs() < 1e-6);
+        assert!((cfg.gain - 1.0).abs() < 1e-6);
         assert!(!cfg.keyboard_mode);
     }
 

@@ -110,11 +110,16 @@ fn build_audio_io(
 
                 // In keyboard mode: bypass vocoder DSP, output carrier * gain directly.
                 // In vocoder mode: impose modulator spectral envelope onto carrier, then apply gain.
-                let out = if kb_mode {
+                let mut out = if kb_mode {
                     (carrier_sample as f32) * g
                 } else {
-                    (vocoder.process(mod_sample, carrier_sample) as f32) * g
+                    // Vocoder filter banks lose a lot of energy, so we apply a 4.0x makeup gain
+                    (vocoder.process(mod_sample, carrier_sample) as f32) * g * 4.0
                 };
+
+                // Soft clip to prevent harsh digital clipping (square wave)
+                out = out.tanh();
+
                 max_out = max_out.max(out.abs());
 
                 for sample in frame.iter_mut() {
