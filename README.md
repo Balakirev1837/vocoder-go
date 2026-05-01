@@ -17,6 +17,27 @@ Key parameters:
 
 ## Building
 
+### System Dependencies
+
+On Linux, you will need the ALSA development headers for audio and MIDI support (`cpal` and `midir` dependencies).
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install libasound2-dev pkg-config
+```
+
+**Fedora/Nobara:**
+```bash
+sudo dnf install alsa-lib-devel pkgconf-pkg-config
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S alsa-lib pkgconf
+```
+
+Once dependencies are installed, build the project:
+
 ```bash
 cargo build
 ```
