@@ -13,51 +13,40 @@ use vocoder::dsp;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
-fn main() -> anyhow::Result<()> {
-    // ── Shared state between audio callback, MIDI, and TUI ───────────
-    // 255 = no active note (valid MIDI notes are 0..=127).
-    let active_note = Arc::new(AtomicU8::new(255));
-    let input_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
-    let output_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+/// Build a new [`audio::AudioIo`] with the vocoder DSP callback bound to the
+/// given shared state. Used both at startup and when the user switches devices.
+#[cfg(feature = "audio")]
+fn build_audio_io(
+    active_note: &Arc<AtomicU8>,
+    input_level: &Arc<AtomicU32>,
+    output_level: &Arc<AtomicU32>,
+    input_device: Option<&str>,
+    output_device: Option<&str>,
+) -> anyhow::Result<audio::AudioIo> {
+    let active_note = Arc::clone(active_note);
+    let input_level = Arc::clone(input_level);
+    let output_level = Arc::clone(output_level);
 
-    // ── Start MIDI input ─────────────────────────────────────────────
-    #[cfg(feature = "midi")]
-    let midi_handle = match midi::start_midi_input(None) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            eprintln!("MIDI: {}", e);
-            None
-        }
+    let mut vocoder = dsp::Vocoder::new(
+        20, // bands
+        200.0, 8000.0, // freq range
+        4.0,    // Q
+        0.001, 0.05, // attack / release
+        44100.0,
+    );
+    let mut phase: f64 = 0.0;
+    let sample_rate_f64: f64 = 44100.0;
+
+    let config = audio::AudioIoConfig {
+        sample_rate: Some(44100),
+        buffer_size: Some(512),
     };
 
-    #[cfg(feature = "midi")]
-    let midi_connected = midi_handle.is_some();
-    #[cfg(not(feature = "midi"))]
-    let midi_connected = false;
-
-    // ── Start audio I/O with vocoder DSP ─────────────────────────────
-    #[cfg(feature = "audio")]
-    let audio_result = {
-        let active_note = Arc::clone(&active_note);
-        let input_level = Arc::clone(&input_level);
-        let output_level = Arc::clone(&output_level);
-
-        let mut vocoder = dsp::Vocoder::new(
-            20, // bands
-            200.0, 8000.0, // freq range
-            4.0,    // Q
-            0.001, 0.05, // attack / release
-            44100.0,
-        );
-        let mut phase: f64 = 0.0;
-        let sample_rate_f64: f64 = 44100.0;
-
-        let config = audio::AudioIoConfig {
-            sample_rate: Some(44100),
-            buffer_size: Some(512),
-        };
-
-        audio::AudioIo::new(&config, None, None, move |input_block, output, channels| {
+    audio::AudioIo::new(
+        &config,
+        input_device,
+        output_device,
+        move |input_block, output, channels| {
             let ch = channels as usize;
             let mod_samples: &[f32] = input_block
                 .and_then(|b| b.get(0))
@@ -102,21 +91,48 @@ fn main() -> anyhow::Result<()> {
 
             input_level.store(max_in.to_bits(), Ordering::Relaxed);
             output_level.store(max_out.to_bits(), Ordering::Relaxed);
-        })
-    };
+        },
+    )
+}
 
-    #[cfg(feature = "audio")]
-    let audio_running = audio_result.is_ok();
-    #[cfg(feature = "audio")]
-    let _audio_io = match audio_result {
-        Ok(io) => Some(io),
+fn main() -> anyhow::Result<()> {
+    // ── Shared state between audio callback, MIDI, and TUI ───────────
+    // 255 = no active note (valid MIDI notes are 0..=127).
+    let active_note = Arc::new(AtomicU8::new(255));
+    let input_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+    let output_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+
+    // ── Start MIDI input ─────────────────────────────────────────────
+    #[cfg(feature = "midi")]
+    let mut midi_handle = match midi::start_midi_input(None) {
+        Ok(h) => Some(h),
         Err(e) => {
-            eprintln!("Audio: {}", e);
+            eprintln!("MIDI: {}", e);
             None
         }
     };
+
+    #[cfg(feature = "midi")]
+    let mut midi_connected = midi_handle.is_some();
+    #[cfg(not(feature = "midi"))]
+    let mut midi_connected = false;
+
+    // ── Start audio I/O with vocoder DSP ─────────────────────────────
+    #[cfg(feature = "audio")]
+    let mut _audio_io: Option<audio::AudioIo> = {
+        match build_audio_io(&active_note, &input_level, &output_level, None, None) {
+            Ok(io) => Some(io),
+            Err(e) => {
+                eprintln!("Audio: {}", e);
+                None
+            }
+        }
+    };
+
+    #[cfg(feature = "audio")]
+    let mut audio_running = _audio_io.is_some();
     #[cfg(not(feature = "audio"))]
-    let audio_running = false;
+    let mut audio_running = false;
 
     // ── Run TUI with live status updates ─────────────────────────────
     #[cfg(feature = "tui")]
@@ -165,6 +181,14 @@ fn main() -> anyhow::Result<()> {
             output_level: 0.0,
         });
 
+        // Track currently active devices so we can detect changes.
+        #[cfg(feature = "audio")]
+        let mut prev_audio_input = app.config.audio_input_device.clone();
+        #[cfg(feature = "audio")]
+        let mut prev_audio_output = app.config.audio_output_device.clone();
+        #[cfg(feature = "midi")]
+        let mut prev_midi_port = app.config.midi_input_port.clone();
+
         while !app.should_quit {
             // Poll MIDI events and update the shared active note
             #[cfg(feature = "midi")]
@@ -203,6 +227,61 @@ fn main() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(50))? {
                 let evt = event::read()?;
                 app.handle_event(&evt);
+            }
+
+            // ── Detect device changes and restart streams ────────────
+            #[cfg(feature = "audio")]
+            {
+                let input_changed = app.config.audio_input_device != prev_audio_input;
+                let output_changed = app.config.audio_output_device != prev_audio_output;
+                if input_changed || output_changed {
+                    prev_audio_input = app.config.audio_input_device.clone();
+                    prev_audio_output = app.config.audio_output_device.clone();
+
+                    // Drop old stream first
+                    _audio_io = None;
+
+                    let input_name = app.config.audio_input_device.as_deref();
+                    let output_name = app.config.audio_output_device.as_deref();
+                    match build_audio_io(
+                        &active_note,
+                        &input_level,
+                        &output_level,
+                        input_name,
+                        output_name,
+                    ) {
+                        Ok(io) => {
+                            _audio_io = Some(io);
+                            audio_running = true;
+                        }
+                        Err(e) => {
+                            eprintln!("Audio restart failed: {}", e);
+                            audio_running = false;
+                        }
+                    }
+                }
+            }
+
+            #[cfg(feature = "midi")]
+            {
+                if app.config.midi_input_port != prev_midi_port {
+                    prev_midi_port = app.config.midi_input_port.clone();
+
+                    // Drop old connection first
+                    midi_handle = None;
+
+                    let port_name = app.config.midi_input_port.as_deref();
+                    match midi::start_midi_input(port_name) {
+                        Ok(h) => {
+                            midi_handle = Some(h);
+                            midi_connected = true;
+                        }
+                        Err(e) => {
+                            eprintln!("MIDI restart failed: {}", e);
+                            midi_connected = false;
+                        }
+                    }
+                }
             }
         }
 
