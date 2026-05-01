@@ -319,12 +319,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
-    render_title(f, chunks[0]);
+    render_title(f, app, chunks[0]);
     render_body(f, app, chunks[1]);
     render_help(f, chunks[2]);
 }
 
-fn render_title(f: &mut Frame, area: Rect) {
+fn render_title(f: &mut Frame, app: &App, area: Rect) {
+    let mode_label = if app.config.keyboard_mode {
+        "KEYBOARD"
+    } else {
+        "VOCODER"
+    };
+    let mode_color = if app.config.keyboard_mode {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " ✦ ",
@@ -343,6 +353,10 @@ fn render_title(f: &mut Frame, area: Rect) {
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" [{}] ", mode_label),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
     ]))
     .block(
@@ -587,6 +601,8 @@ fn render_help(f: &mut Frame, area: Rect) {
         Span::styled("navigate  ", Style::default().fg(Color::Gray)),
         Span::styled("←/h →/l ", Style::default().fg(Color::DarkGray)),
         Span::styled("adjust  ", Style::default().fg(Color::Gray)),
+        Span::styled("Tab ", Style::default().fg(Color::DarkGray)),
+        Span::styled("mode  ", Style::default().fg(Color::Gray)),
         Span::styled("q/Esc ", Style::default().fg(Color::DarkGray)),
         Span::styled("quit", Style::default().fg(Color::Gray)),
     ]))
@@ -665,6 +681,7 @@ mod tests {
         assert!((cfg.formant_shift - 1.0).abs() < 1e-6);
         assert!((cfg.pitch_shift - 0.0).abs() < 1e-6);
         assert!((cfg.gain - 3.0).abs() < 1e-6);
+        assert!(!cfg.keyboard_mode);
     }
 
     /// TUI-CF-02: Default devices are None.
@@ -924,6 +941,17 @@ mod tests {
         assert_eq!(app.config.sample_rate, config_before.sample_rate);
         assert_eq!(app.selected_field, 0);
         assert!(!app.should_quit);
+    }
+
+    /// TUI-HE-09: Tab toggles keyboard_mode.
+    #[test]
+    fn handle_event_tab_toggles_keyboard_mode() {
+        let mut app = App::new(vec![], vec![], vec![]);
+        assert!(!app.config.keyboard_mode);
+        app.handle_event(&key_press(KeyCode::Tab));
+        assert!(app.config.keyboard_mode);
+        app.handle_event(&key_press(KeyCode::Tab));
+        assert!(!app.config.keyboard_mode);
     }
 
     // --- TUI-DV: label() and display_value() tests ---

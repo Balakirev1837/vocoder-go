@@ -10,7 +10,7 @@ use tui::{App, Status};
 #[cfg(feature = "audio")]
 use vocoder::dsp;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Build a new [`audio::AudioIo`] with the vocoder DSP callback bound to the
@@ -28,12 +28,14 @@ fn build_audio_io(
     formant_shift: f32,
     gain: &Arc<AtomicU32>,
     pitch_shift: &Arc<AtomicU32>,
+    keyboard_mode: &Arc<AtomicBool>,
 ) -> anyhow::Result<audio::AudioIo> {
     let active_notes = Arc::clone(active_notes);
     let input_level = Arc::clone(input_level);
     let output_level = Arc::clone(output_level);
     let gain = Arc::clone(gain);
     let pitch_shift = Arc::clone(pitch_shift);
+    let keyboard_mode = Arc::clone(keyboard_mode);
 
     let sample_rate_f64 = sample_rate as f64;
 
@@ -77,6 +79,9 @@ fn build_audio_io(
             // Read gain from shared atomic.
             let g = f32::from_bits(gain.load(Ordering::Relaxed));
 
+            // Read keyboard_mode flag from shared atomic.
+            let kb_mode = keyboard_mode.load(Ordering::Relaxed);
+
             let mut max_out = 0.0f32;
             let mut max_in = 0.0f32;
 
@@ -103,8 +108,13 @@ fn build_audio_io(
                     0.0
                 };
 
-                // Vocode: impose modulator spectral envelope onto carrier, then apply gain.
-                let out = (vocoder.process(mod_sample, carrier_sample) as f32) * g;
+                // In keyboard mode: bypass vocoder DSP, output carrier * gain directly.
+                // In vocoder mode: impose modulator spectral envelope onto carrier, then apply gain.
+                let out = if kb_mode {
+                    (carrier_sample as f32) * g
+                } else {
+                    (vocoder.process(mod_sample, carrier_sample) as f32) * g
+                };
                 max_out = max_out.max(out.abs());
 
                 for sample in frame.iter_mut() {
@@ -130,6 +140,8 @@ fn main() -> anyhow::Result<()> {
     let gain = Arc::new(AtomicU32::new(tui::Config::default().gain.to_bits()));
     #[cfg(feature = "tui")]
     let pitch_shift = Arc::new(AtomicU32::new(tui::Config::default().pitch_shift.to_bits()));
+    #[cfg(feature = "tui")]
+    let keyboard_mode = Arc::new(AtomicBool::new(tui::Config::default().keyboard_mode));
 
     // ── Start MIDI input ─────────────────────────────────────────────
     #[cfg(feature = "midi")]
@@ -158,11 +170,12 @@ fn main() -> anyhow::Result<()> {
         let (sr, bs, fs) = (44_100u32, 512u32, 1.0f32);
 
         #[cfg(feature = "tui")]
-        let (g, ps) = (gain.clone(), pitch_shift.clone());
+        let (g, ps, km) = (gain.clone(), pitch_shift.clone(), keyboard_mode.clone());
         #[cfg(not(feature = "tui"))]
-        let (g, ps) = (
+        let (g, ps, km) = (
             Arc::new(AtomicU32::new(0.8f32.to_bits())),
             Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            Arc::new(AtomicBool::new(false)),
         );
 
         match build_audio_io(
@@ -176,6 +189,7 @@ fn main() -> anyhow::Result<()> {
             fs,
             &g,
             &ps,
+            &km,
         ) {
             Ok(io) => Some(io),
             Err(e) => {
@@ -292,6 +306,7 @@ fn main() -> anyhow::Result<()> {
             {
                 gain.store(app.config.gain.to_bits(), Ordering::Relaxed);
                 pitch_shift.store(app.config.pitch_shift.to_bits(), Ordering::Relaxed);
+                keyboard_mode.store(app.config.keyboard_mode, Ordering::Relaxed);
             }
 
             // Render
@@ -334,6 +349,7 @@ fn main() -> anyhow::Result<()> {
                         app.config.formant_shift,
                         &gain,
                         &pitch_shift,
+                        &keyboard_mode,
                     ) {
                         Ok(io) => {
                             _audio_io = Some(io);
