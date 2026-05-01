@@ -25,6 +25,10 @@ pub struct Config {
     pub formant_shift: f32,
     pub pitch_shift: f32,
     pub gain: f32,
+    /// When `true`, the audio callback bypasses the vocoder DSP and outputs
+    /// the raw carrier signal multiplied by gain (Keyboard mode).
+    /// When `false`, normal vocoder processing is applied (Vocoder mode).
+    pub keyboard_mode: bool,
 }
 
 impl Default for Config {
@@ -38,7 +42,8 @@ impl Default for Config {
             midi_channel: 1,
             formant_shift: 1.0,
             pitch_shift: 0.0,
-            gain: 0.8,
+            gain: 3.0,
+            keyboard_mode: false,
         }
     }
 }
@@ -147,7 +152,7 @@ impl ConfigField {
                 cfg.pitch_shift = (cfg.pitch_shift + delta as f32 * 0.5).clamp(-24.0, 24.0);
             }
             Self::Gain => {
-                cfg.gain = (cfg.gain + delta as f32 * 0.05).clamp(0.0, 1.5);
+                cfg.gain = (cfg.gain + delta as f32 * 0.05).clamp(0.0, 10.0);
             }
         }
     }
@@ -226,6 +231,9 @@ impl App {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     self.should_quit = true;
+                }
+                KeyCode::Tab => {
+                    self.config.keyboard_mode = !self.config.keyboard_mode;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     if self.selected_field > 0 {
@@ -656,7 +664,7 @@ mod tests {
         assert_eq!(cfg.midi_channel, 1);
         assert!((cfg.formant_shift - 1.0).abs() < 1e-6);
         assert!((cfg.pitch_shift - 0.0).abs() < 1e-6);
-        assert!((cfg.gain - 0.8).abs() < 1e-6);
+        assert!((cfg.gain - 3.0).abs() < 1e-6);
     }
 
     /// TUI-CF-02: Default devices are None.
@@ -748,9 +756,9 @@ mod tests {
         ConfigField::Gain.adjust(&mut cfg, -1);
         assert!((cfg.gain - 0.0).abs() < 1e-6);
 
-        cfg.gain = 1.5;
+        cfg.gain = 10.0;
         ConfigField::Gain.adjust(&mut cfg, 1);
-        assert!((cfg.gain - 1.5).abs() < 1e-6);
+        assert!((cfg.gain - 10.0).abs() < 1e-6);
     }
 
     /// TUI-AD-08: FormantShift step size is 0.05.

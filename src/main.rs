@@ -98,7 +98,7 @@ fn build_audio_io(
                             phases[idx] -= 2.0 * std::f64::consts::PI;
                         }
                     }
-                    sum / note_count as f64
+                    sum / (note_count as f64).sqrt().max(1.0)
                 } else {
                     0.0
                 };
