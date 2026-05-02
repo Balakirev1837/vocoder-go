@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -554,6 +555,9 @@ type model struct {
 	// Progress bars for level meters
 	inputProgress  progress.Model
 	outputProgress progress.Model
+
+	// Spinner animation shown when audio is active
+	spinner spinner.Model
 }
 
 // newModel creates a new TUI model with the given shared state and device lists.
@@ -584,6 +588,10 @@ func newModel(state *SharedState, audioIn, audioOut, midiIn []string) model {
 	)
 	outProg.Width = 20
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	return model{
 		state:              state,
 		cursor:             0,
@@ -592,14 +600,18 @@ func newModel(state *SharedState, audioIn, audioOut, midiIn []string) model {
 		midiInputPorts:     midiIn,
 		inputProgress:      inProg,
 		outputProgress:     outProg,
+		spinner:            s,
 	}
 }
 
-// Init satisfies tea.Model. Starts the periodic status tick.
+// Init satisfies tea.Model. Starts the periodic status tick and spinner.
 func (m model) Init() tea.Cmd {
-	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+	return tea.Batch(
+		m.spinner.Tick,
+		tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		}),
+	)
 }
 
 // Update handles incoming messages and returns an updated model + command.
@@ -610,6 +622,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -788,7 +805,7 @@ func (m model) renderStatusPanel() string {
 	if audioActive {
 		audioIcon := statusOKStyle.Render("●")
 		audioText := statusOKStyle.Render("Running")
-		b.WriteString(fmt.Sprintf(" %s Audio   %s\n", audioIcon, audioText))
+		b.WriteString(fmt.Sprintf(" %s Audio   %s %s\n", audioIcon, audioText, m.spinner.View()))
 	} else {
 		audioIcon := statusFailStyle.Render("○")
 		audioText := statusFailStyle.Render("Stopped")
