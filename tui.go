@@ -50,6 +50,8 @@ type Config struct {
 	KeyboardMode bool
 	// Carrier waveform: 0=Sine, 1=Sawtooth, 2=Square.
 	Waveform int
+	// Envelope follower speed: 0=Fast, 1=Medium, 2=Slow.
+	EnvelopeSpeed int
 }
 
 // DefaultConfig returns a Config populated with sensible defaults,
@@ -68,6 +70,7 @@ func DefaultConfig() Config {
 		Bands:             20,
 		KeyboardMode:      false,
 		Waveform:          0,
+		EnvelopeSpeed:     1,
 	}
 }
 
@@ -224,6 +227,7 @@ const (
 	fieldGain
 	fieldBands
 	fieldWaveform
+	fieldEnvelopeSpeed
 )
 
 var configFields = []configField{
@@ -238,6 +242,7 @@ var configFields = []configField{
 	fieldGain,
 	fieldBands,
 	fieldWaveform,
+	fieldEnvelopeSpeed,
 }
 
 func (f configField) label() string {
@@ -264,6 +269,8 @@ func (f configField) label() string {
 		return "Bands"
 	case fieldWaveform:
 		return "Waveform"
+	case fieldEnvelopeSpeed:
+		return "Env Speed"
 	default:
 		return ""
 	}
@@ -311,6 +318,17 @@ func (f configField) displayValue(cfg Config) string {
 		default:
 			return "Sine"
 		}
+	case fieldEnvelopeSpeed:
+		switch cfg.EnvelopeSpeed {
+		case 0:
+			return "Fast"
+		case 1:
+			return "Medium"
+		case 2:
+			return "Slow"
+		default:
+			return "Medium"
+		}
 	default:
 		return ""
 	}
@@ -356,6 +374,8 @@ func (f configField) adjust(cfg *Config, delta int) {
 		cfg.Bands = opts[newIdx]
 	case fieldWaveform:
 		cfg.Waveform = ((cfg.Waveform+delta)%3 + 3) % 3
+	case fieldEnvelopeSpeed:
+		cfg.EnvelopeSpeed = ((cfg.EnvelopeSpeed+delta)%3 + 3) % 3
 	}
 }
 
@@ -365,7 +385,7 @@ func (f configField) needsRestart() bool {
 	switch f {
 	case fieldAudioInputDevice, fieldAudioOutputDevice,
 		fieldMidiInputPort, fieldSampleRate, fieldBufferSize,
-		fieldBands:
+		fieldBands, fieldEnvelopeSpeed:
 		return true
 	default:
 		return false
@@ -373,6 +393,21 @@ func (f configField) needsRestart() bool {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+// envelopeParams returns the attack and release times (in seconds)
+// based on the EnvelopeSpeed setting: 0=Fast, 1=Medium, 2=Slow.
+func envelopeParams(speed int) (attack, release float64) {
+	switch speed {
+	case 0: // Fast
+		return 0.001, 0.01
+	case 1: // Medium
+		return 0.005, 0.05
+	case 2: // Slow
+		return 0.02, 0.2
+	default:
+		return 0.005, 0.05
+	}
+}
 
 func clamp(val, min, max int) int {
 	if val < min {
@@ -852,8 +887,9 @@ func (m model) restartStreams() {
 	// Reset DSP state for the new sample rate.
 	m.state.mu.Lock()
 	sr := float64(cfg.SampleRate)
+	attack, release := envelopeParams(cfg.EnvelopeSpeed)
 	m.state.SampleRate = sr
-	m.state.Vocoder = NewVocoder(cfg.Bands, 200.0, 8000.0, 4.0, 0.001, 0.05, sr)
+	m.state.Vocoder = NewVocoder(cfg.Bands, 200.0, 8000.0, 4.0, attack, release, sr)
 	m.state.Phases = make(map[uint8]float64)
 	m.state.mu.Unlock()
 
