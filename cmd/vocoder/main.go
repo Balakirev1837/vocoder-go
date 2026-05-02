@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"vocoder"
+	"vocoder/pkg/vocoder"
 )
 
 func main() {
