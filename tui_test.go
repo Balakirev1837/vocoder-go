@@ -258,22 +258,6 @@ func TestNoteName(t *testing.T) {
 	}
 }
 
-func TestLevelBar(t *testing.T) {
-	bar0 := levelBar(0.0, 10)
-	bar1 := levelBar(1.0, 10)
-	barHalf := levelBar(0.5, 10)
-	if bar0 == bar1 {
-		t.Error("zero and full level bars should differ")
-	}
-	// Half bar should be different from both extremes.
-	if barHalf == bar0 {
-		t.Error("half bar should differ from zero bar")
-	}
-	if barHalf == bar1 {
-		t.Error("half bar should differ from full bar")
-	}
-}
-
 // ── configField.needsRestart tests ─────────────────────────────────
 
 func TestConfigFieldNeedsRestart(t *testing.T) {

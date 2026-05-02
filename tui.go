@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -358,18 +359,6 @@ func noteName(n uint8) string {
 	return fmt.Sprintf("%s%d", names[int(n)%12], octave)
 }
 
-// levelBar renders a level meter bar of given width (0..width blocks filled).
-func levelBar(level float32, width int) string {
-	filled := int(float32(width) * clampFloat(level, 0.0, 1.0))
-	if filled > width {
-		filled = width
-	}
-	return fmt.Sprintf("[%s%s]",
-		strings.Repeat("█", filled),
-		strings.Repeat("░", width-filled),
-	)
-}
-
 // ── Styles ─────────────────────────────────────────────────────────
 
 var (
@@ -459,6 +448,10 @@ type model struct {
 	audioInputDevices  []string
 	audioOutputDevices []string
 	midiInputPorts     []string
+
+	// Progress bars for level meters
+	inputProgress  progress.Model
+	outputProgress progress.Model
 }
 
 // newModel creates a new TUI model with the given shared state and device lists.
@@ -476,12 +469,27 @@ func newModel(state *SharedState, audioIn, audioOut, midiIn []string) model {
 		cfg.MidiInputPort = &midiIn[0]
 	}
 
+	// Initialize progress bars with gradients
+	inProg := progress.New(
+		progress.WithGradient("#00FF00", "#FFFF00"),
+		progress.WithoutPercentage(),
+	)
+	inProg.Width = 20
+
+	outProg := progress.New(
+		progress.WithGradient("#FF00FF", "#00FFFF"),
+		progress.WithoutPercentage(),
+	)
+	outProg.Width = 20
+
 	return model{
 		state:              state,
 		cursor:             0,
 		audioInputDevices:  audioIn,
 		audioOutputDevices: audioOut,
 		midiInputPorts:     midiIn,
+		inputProgress:      inProg,
+		outputProgress:     outProg,
 	}
 }
 
@@ -700,11 +708,11 @@ func (m model) renderStatusPanel() string {
 	b.WriteString("\n")
 	inPct := int(clampFloat(inputLevel*100, 0, 100))
 	b.WriteString(inputLevelStyle.Render("  In  "))
-	b.WriteString(fmt.Sprintf("%s %d%%\n", levelBar(inputLevel, 20), inPct))
+	b.WriteString(fmt.Sprintf("%s %d%%\n", m.inputProgress.ViewAs(float64(clampFloat(inputLevel, 0.0, 1.0))), inPct))
 
 	outPct := int(clampFloat(outputLevel*100, 0, 100))
 	b.WriteString(outputLevelStyle.Render(" Out "))
-	b.WriteString(fmt.Sprintf("%s %d%%\n", levelBar(outputLevel, 20), outPct))
+	b.WriteString(fmt.Sprintf("%s %d%%\n", m.outputProgress.ViewAs(float64(clampFloat(outputLevel, 0.0, 1.0))), outPct))
 
 	// Note display
 	b.WriteString("\n")
