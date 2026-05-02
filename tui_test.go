@@ -267,6 +267,7 @@ func TestConfigFieldNeedsRestart(t *testing.T) {
 		fieldMidiInputPort,
 		fieldSampleRate,
 		fieldBufferSize,
+		fieldBands,
 	}
 	for _, f := range restartFields {
 		if !f.needsRestart() {

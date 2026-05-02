@@ -42,10 +42,14 @@ type Config struct {
 	FormantShift      float32
 	PitchShift        float32
 	Gain              float32
+	// Number of vocoder filter bands.
+	Bands int
 	// When true, bypasses vocoder DSP and outputs the raw carrier signal
 	// multiplied by gain (Keyboard mode). When false, normal vocoder
 	// processing is applied (Vocoder mode).
 	KeyboardMode bool
+	// Carrier waveform: 0=Sine, 1=Sawtooth, 2=Square.
+	Waveform int
 }
 
 // DefaultConfig returns a Config populated with sensible defaults,
@@ -61,7 +65,9 @@ func DefaultConfig() Config {
 		FormantShift:      1.0,
 		PitchShift:        0.0,
 		Gain:              1.0,
+		Bands:             20,
 		KeyboardMode:      false,
+		Waveform:          0,
 	}
 }
 
@@ -117,6 +123,7 @@ func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channe
 	s.mu.Lock()
 	gain := s.Config.Gain
 	keyboardMode := s.Config.KeyboardMode
+	waveform := s.Config.Waveform
 	s.mu.Unlock()
 
 	notes := s.ActiveNotes.List()
@@ -139,7 +146,7 @@ func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channe
 			maxInput = absIn
 		}
 
-		// Generate carrier: sum of sines / sqrt(N).
+		// Generate carrier based on waveform selection.
 		var carrier float64
 		if n > 0 {
 			invSqrtN := 1.0 / math.Sqrt(float64(n))
@@ -148,7 +155,20 @@ func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channe
 				s.Phases[note] += freq / sr
 				// Wrap phase to [0, 1).
 				s.Phases[note] -= math.Floor(s.Phases[note])
-				carrier += math.Sin(2.0*math.Pi*s.Phases[note]) * invSqrtN
+				var sample float64
+				switch waveform {
+				case 1: // Sawtooth
+					sample = 2.0*s.Phases[note] - 1.0
+				case 2: // Square
+					if s.Phases[note] < 0.5 {
+						sample = 1.0
+					} else {
+						sample = -1.0
+					}
+				default: // Sine
+					sample = math.Sin(2.0 * math.Pi * s.Phases[note])
+				}
+				carrier += sample * invSqrtN
 			}
 		}
 
@@ -202,6 +222,8 @@ const (
 	fieldFormantShift
 	fieldPitchShift
 	fieldGain
+	fieldBands
+	fieldWaveform
 )
 
 var configFields = []configField{
@@ -214,6 +236,8 @@ var configFields = []configField{
 	fieldFormantShift,
 	fieldPitchShift,
 	fieldGain,
+	fieldBands,
+	fieldWaveform,
 }
 
 func (f configField) label() string {
@@ -236,6 +260,10 @@ func (f configField) label() string {
 		return "Pitch Shift"
 	case fieldGain:
 		return "Gain"
+	case fieldBands:
+		return "Bands"
+	case fieldWaveform:
+		return "Waveform"
 	default:
 		return ""
 	}
@@ -270,6 +298,19 @@ func (f configField) displayValue(cfg Config) string {
 		return fmt.Sprintf("%+.1f semitones", cfg.PitchShift)
 	case fieldGain:
 		return fmt.Sprintf("%.0f%%", cfg.Gain*100.0)
+	case fieldBands:
+		return fmt.Sprintf("%d", cfg.Bands)
+	case fieldWaveform:
+		switch cfg.Waveform {
+		case 0:
+			return "Sine"
+		case 1:
+			return "Sawtooth"
+		case 2:
+			return "Square"
+		default:
+			return "Sine"
+		}
 	default:
 		return ""
 	}
@@ -305,6 +346,16 @@ func (f configField) adjust(cfg *Config, delta int) {
 		cfg.PitchShift = clampFloat(cfg.PitchShift+float32(delta)*0.5, -24.0, 24.0)
 	case fieldGain:
 		cfg.Gain = clampFloat(cfg.Gain+float32(delta)*0.05, 0.0, 10.0)
+	case fieldBands:
+		opts := []int{8, 12, 16, 20, 24, 32}
+		idx := sliceIndex(opts, cfg.Bands)
+		if idx < 0 {
+			idx = 3 // default 20
+		}
+		newIdx := clamp(idx+delta, 0, len(opts)-1)
+		cfg.Bands = opts[newIdx]
+	case fieldWaveform:
+		cfg.Waveform = ((cfg.Waveform+delta)%3 + 3) % 3
 	}
 }
 
@@ -313,7 +364,8 @@ func (f configField) adjust(cfg *Config, delta int) {
 func (f configField) needsRestart() bool {
 	switch f {
 	case fieldAudioInputDevice, fieldAudioOutputDevice,
-		fieldMidiInputPort, fieldSampleRate, fieldBufferSize:
+		fieldMidiInputPort, fieldSampleRate, fieldBufferSize,
+		fieldBands:
 		return true
 	default:
 		return false
@@ -801,7 +853,7 @@ func (m model) restartStreams() {
 	m.state.mu.Lock()
 	sr := float64(cfg.SampleRate)
 	m.state.SampleRate = sr
-	m.state.Vocoder = NewVocoder(20, 200.0, 8000.0, 4.0, 0.001, 0.05, sr)
+	m.state.Vocoder = NewVocoder(cfg.Bands, 200.0, 8000.0, 4.0, 0.001, 0.05, sr)
 	m.state.Phases = make(map[uint8]float64)
 	m.state.mu.Unlock()
 
