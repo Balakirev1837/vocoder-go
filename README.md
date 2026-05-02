@@ -1,6 +1,6 @@
-# vocoder
+# vocoder (Go Edition)
 
-A real-time polyphonic channel vocoder written in Rust.
+A real-time polyphonic channel vocoder written in Go, featuring a beautiful terminal user interface built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
 
 Takes a **modulator** signal (e.g. microphone / voice) and a **carrier** signal (a synthesizer driven by MIDI — with full **chord / polyphony** support) and imposes the spectral envelope of the modulator onto the carrier — the classic robot-voice effect.
 
@@ -8,18 +8,16 @@ Takes a **modulator** signal (e.g. microphone / voice) and a **carrier** signal 
 
 The DSP core splits both signals through a bank of bandpass filters, tracks the modulator's energy in each band with envelope followers, and uses those envelopes to gate the matching carrier bands. The result is summed back into a single output stream.
 
-Key parameters:
-
-- **Bands** — number of frequency channels (default: 20)
-- **Frequency range** — lower and upper bounds of the filter bank (default: 200–8000 Hz, scaled by formant shift)
-- **Q** — quality factor of each bandpass filter (default: 4.0)
-- **Attack / Release** — envelope follower time constants
-
 ## Features
 
-### Polyphony (Chords)
+### Polyphony (Chords) & Waveforms
 
-Multiple MIDI notes can sound simultaneously. The carrier is synthesised as a sum of sine-wave oscillators — one per active note — with energy-normalised mixing (`1/√N` scaling) to prevent clipping when playing chords.
+Multiple MIDI notes can sound simultaneously. The carrier is synthesised as a sum of oscillators — one per active note — with energy-normalised mixing (`1/√N` scaling) to prevent clipping when playing chords.
+
+You can choose between three carrier waveforms:
+- **Sine**: Smooth and classic.
+- **Sawtooth**: Rich in harmonics, perfect for aggressive, robotic Daft Punk-style vocoding.
+- **Square**: Hollow and retro.
 
 ### Device Selection (TUI)
 
@@ -38,27 +36,28 @@ Press **Tab** to switch between two modes:
 | Mode | Behaviour |
 |------|-----------|
 | **Vocoder** (default) | Full vocoder DSP: modulator spectral envelope is imposed onto the carrier. A 4× makeup gain compensates for energy lost in the filter bank. |
-| **Keyboard** | Bypasses the vocoder DSP. The raw carrier signal (sine-wave synth) is output directly — useful for testing your MIDI setup. |
+| **Keyboard** | Bypasses the vocoder DSP. The raw carrier signal (synth) is output directly — useful for testing your MIDI setup. |
 
-The current mode is displayed in the title bar of the TUI.
+### Audio Quality & Performance
 
-### Audio Quality
+- **Low-latency Audio**: Powered by [malgo](https://github.com/gen2brain/malgo) (miniaudio) for rock-solid, low-latency audio I/O.
+- **Zero-allocation audio callbacks**: The audio processing loop is completely allocation-free, ensuring the Go garbage collector never interrupts your audio stream.
+- **Precomputed MIDI Frequencies**: MIDI note frequencies are precomputed in a lookup table to save thousands of `math.Pow` calls per second.
+- **Fast Soft clipping**: Output is passed through a fast, branchless soft-clipper (`x / (1 + |x|)`) to prevent harsh digital clipping when levels are hot.
+- **Denormal flushing**: Filter state variables and envelope followers flush subnormal floats to zero to prevent CPU performance penalties.
 
-- **Soft clipping** — output is passed through a `tanh()` waveshaper to prevent harsh digital clipping when levels are hot.
-- **Makeup gain** — a 4× gain is applied after the vocoder filter bank to compensate for energy loss across the bandpass filters.
-- **Zero-allocation audio callbacks** — audio input and output callbacks use a block-recycling scheme (`SharedBuffer`) that reuses previously allocated buffers, avoiding heap allocations on the real-time audio thread.
-- **Denormal flushing** — filter state variables and envelope followers flush subnormal floats to zero to prevent CPU performance penalties.
-- **Pre-allocated format conversion buffers** — when the audio device uses i16 or u16 sample formats, conversion buffers are allocated once and reused.
+### Beautiful Terminal UI
 
-### MIDI Running Status
+Built with the Charm ecosystem (`bubbletea`, `lipgloss`, `bubbles`), the UI features:
+- Colorful, rounded-border panels.
+- Smooth gradient progress bars for audio input/output levels.
+- A live spinner animation that indicates when the audio engine is actively running.
 
-The MIDI parser (`MidiParser`) fully supports the MIDI running-status optimisation: consecutive messages of the same type can omit the status byte. Real-time messages (`0xF8`–`0xFF`) pass through without affecting running status, and system-common messages (`0xF0`–`0xF7`) correctly reset the running-status context.
-
-## Building
+## Building & Running
 
 ### System Dependencies
 
-On Linux, you will need the ALSA development headers for audio and MIDI support (`cpal` and `midir` dependencies).
+On Linux, you will need the ALSA development headers for audio and MIDI support.
 
 **Ubuntu/Debian:**
 ```bash
@@ -75,18 +74,12 @@ sudo dnf install alsa-lib-devel pkgconf-pkg-config
 sudo pacman -S alsa-lib pkgconf
 ```
 
-Once dependencies are installed, build the project:
+### Running
+
+Requires Go 1.22 or later.
 
 ```bash
-cargo build
-```
-
-Requires Rust (edition 2024). All features are enabled by default.
-
-## Running
-
-```bash
-cargo run
+go run ./cmd/vocoder
 ```
 
 This opens a terminal UI showing live audio levels, MIDI status, and all active notes. Plug in a MIDI controller and play chords while speaking into your mic.
@@ -115,72 +108,12 @@ This opens a terminal UI showing live audio levels, MIDI status, and all active 
 | Formant Shift | 0.25×–4.0× (step 0.05) | 1.0× |
 | Pitch Shift | −24 to +24 semitones (step 0.5) | 0 |
 | Gain | 0%–1000% (step 5%) | 100% |
-
-## Feature flags
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `audio` | yes | Real-time audio I/O via [cpal](https://crates.io/crates/cpal) |
-| `midi` | yes | MIDI input via [midir](https://crates.io/crates/midir) |
-| `tui` | yes | Terminal UI via [ratatui](https://crates.io/crates/ratatui) |
-
-To build only the DSP core (no audio/MIDI/TUI):
-
-```bash
-cargo build --no-default-features
-```
+| Bands | 8, 12, 16, 20, 24, 32 | 20 |
+| Waveform | Sine, Sawtooth, Square | Sine |
+| Env Speed | Fast, Medium, Slow | Medium |
 
 ## Testing
 
 ```bash
-make test
-# or: cargo test --lib --no-default-features
+go test ./...
 ```
-
-## Project layout
-
-```
-src/
-  lib.rs    — re-exports the DSP and MIDI modules
-  dsp.rs    — biquad filters, envelope followers, filter banks, Vocoder struct
-  audio.rs  — real-time audio input/output with zero-alloc callbacks (feature-gated)
-  midi.rs   — MIDI input parsing with running-status support (feature-gated)
-  tui.rs    — terminal user interface with device selection (feature-gated)
-  main.rs   — wires everything together
-```
-
-## Using the DSP library
-
-The vocoder DSP is usable as a standalone library (no audio hardware needed):
-
-```rust
-use vocoder::dsp::Vocoder;
-
-let mut vocoder = Vocoder::new(
-    20,         // bands
-    200.0,      // low freq (Hz)
-    8000.0,     // high freq (Hz)
-    4.0,        // Q
-    0.001,      // attack (s)
-    0.05,       // release (s)
-    44100.0,    // sample rate
-);
-
-let output = vocoder.process(modulator_sample, carrier_sample);
-```
-
-The MIDI parser is also available as a library feature:
-
-```rust
-use vocoder::midi::MidiParser;
-
-let mut parser = MidiParser::new();
-
-// Full message
-let event = parser.parse(&[0x90, 60, 100]);
-
-// Running status — status byte omitted
-let event = parser.parse(&[64, 80]);
-```
-
-See `src/dsp.rs` and `src/midi.rs` for full API documentation.
