@@ -12,6 +12,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// midiFreqs is a precomputed lookup table mapping MIDI note numbers
+// (0–127) to their corresponding frequencies in Hz.
+var midiFreqs [128]float64
+
+func init() {
+	for i := 0; i < 128; i++ {
+		midiFreqs[i] = 440.0 * math.Pow(2.0, (float64(i)-69.0)/12.0)
+	}
+}
+
+// softClip applies a fast, branchless soft-clipping function:
+// x / (1 + |x|), which maps real numbers into (-1, 1).
+func softClip(x float64) float64 {
+	return x / (1.0 + math.Abs(x))
+}
+
 // ── Configurable parameters for the vocoder ────────────────────────
 
 // Config holds all configurable parameters for the vocoder, mirroring
@@ -96,8 +112,7 @@ func NewSharedState() *SharedState {
 //
 // It reads the active MIDI notes, generates a carrier (sum of sines
 // normalised by 1/sqrt(N)), applies vocoder DSP (or bypasses it in
-// Keyboard mode), applies soft clipping via math.Tanh, and applies
-// makeup gain.
+// Keyboard mode), applies soft clipping, and applies makeup gain.
 func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channels uint32) {
 	s.mu.Lock()
 	gain := s.Config.Gain
@@ -129,7 +144,7 @@ func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channe
 		if n > 0 {
 			invSqrtN := 1.0 / math.Sqrt(float64(n))
 			for _, note := range notes {
-				freq := 440.0 * math.Pow(2.0, (float64(note)-69.0)/12.0)
+				freq := midiFreqs[note]
 				s.Phases[note] += freq / sr
 				// Wrap phase to [0, 1).
 				s.Phases[note] -= math.Floor(s.Phases[note])
@@ -146,7 +161,7 @@ func (s *SharedState) ProcessAudio(modulator []float32, output []float32, channe
 		}
 
 		// Soft clip.
-		sample = math.Tanh(sample)
+		sample = softClip(sample)
 
 		// Makeup gain.
 		sample *= float64(gain)
