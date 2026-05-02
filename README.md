@@ -1,63 +1,40 @@
-# vocoder (Go Edition)
+# vocoder
 
-A real-time polyphonic channel vocoder written in Go, featuring a beautiful terminal user interface built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss).
+A real-time polyphonic channel vocoder written in Go.
 
-Takes a **modulator** signal (e.g. microphone / voice) and a **carrier** signal (a synthesizer driven by MIDI — with full **chord / polyphony** support) and imposes the spectral envelope of the modulator onto the carrier — the classic robot-voice effect.
+It imposes the spectral envelope of a modulator signal (e.g., microphone input) onto a carrier signal (a built-in polyphonic synthesizer driven by MIDI).
 
-## How it works
+## Architecture
 
-The DSP core splits both signals through a bank of bandpass filters, tracks the modulator's energy in each band with envelope followers, and uses those envelopes to gate the matching carrier bands. The result is summed back into a single output stream.
+The DSP core splits both signals through a bank of bandpass filters, tracks the modulator's energy in each band using envelope followers, and uses those envelopes to gate the matching carrier bands. The result is summed into a single output stream.
 
-## Features
+### Audio Engine
 
-### Polyphony (Chords) & Waveforms
-
-Multiple MIDI notes can sound simultaneously. The carrier is synthesised as a sum of oscillators — one per active note — with energy-normalised mixing (`1/√N` scaling) to prevent clipping when playing chords.
-
-You can choose between three carrier waveforms:
-- **Sine**: Smooth and classic.
-- **Sawtooth**: Rich in harmonics, perfect for aggressive, robotic Daft Punk-style vocoding.
-- **Square**: Hollow and retro.
-
-### Device Selection (TUI)
-
-The TUI configuration panel lets you choose audio and MIDI devices at runtime without restarting the application:
-
-- **Audio Input** — select the microphone / input device
-- **Audio Output** — select the speakers / output device
-- **MIDI Input** — select the MIDI controller port
-
-Devices are cycled with `←`/`→` (or `h`/`l`). When a device or audio parameter changes, the stream is automatically restarted.
-
-### Keyboard / Vocoder Mode Toggle
-
-Press **Tab** to switch between two modes:
-
-| Mode | Behaviour |
-|------|-----------|
-| **Vocoder** (default) | Full vocoder DSP: modulator spectral envelope is imposed onto the carrier. A 4× makeup gain compensates for energy lost in the filter bank. |
-| **Keyboard** | Bypasses the vocoder DSP. The raw carrier signal (synth) is output directly — useful for testing your MIDI setup. |
-
-### Audio Quality & Performance
-
-- **Low-latency Audio**: Powered by [malgo](https://github.com/gen2brain/malgo) (miniaudio) for rock-solid, low-latency audio I/O.
-- **Zero-allocation audio callbacks**: The audio processing loop is completely allocation-free, ensuring the Go garbage collector never interrupts your audio stream.
-- **Precomputed MIDI Frequencies**: MIDI note frequencies are precomputed in a lookup table to save thousands of `math.Pow` calls per second.
-- **Fast Soft clipping**: Output is passed through a fast, branchless soft-clipper (`x / (1 + |x|)`) to prevent harsh digital clipping when levels are hot.
+- **Low-latency I/O**: Uses `malgo` (miniaudio) for duplex audio streams.
+- **Zero-allocation callbacks**: The audio processing loop is allocation-free to prevent garbage collection pauses during real-time processing.
+- **Precomputed Frequencies**: MIDI note frequencies are precomputed in a lookup table to avoid per-sample `math.Pow` calls.
+- **Soft clipping**: Output is passed through a branchless soft-clipper (`x / (1 + |x|)`) to prevent digital clipping.
 - **Denormal flushing**: Filter state variables and envelope followers flush subnormal floats to zero to prevent CPU performance penalties.
 
-### Beautiful Terminal UI
+### Carrier Synthesizer
 
-Built with the Charm ecosystem (`bubbletea`, `lipgloss`, `bubbles`), the UI features:
-- Colorful, rounded-border panels.
-- Smooth gradient progress bars for audio input/output levels.
-- A live spinner animation that indicates when the audio engine is actively running.
+- **Polyphony**: Supports multiple simultaneous MIDI notes. Carrier oscillators are summed and energy-normalized (`1/√N` scaling) to prevent clipping.
+- **Waveforms**: Sine, Sawtooth, Square.
+
+### Terminal UI
+
+Built with `bubbletea` and `lipgloss`, the TUI allows runtime configuration without restarting the application.
+
+- **Device Selection**: Select Audio Input, Audio Output, and MIDI Input devices.
+- **Modes**:
+  - *Vocoder*: Full DSP pipeline with 4x makeup gain.
+  - *Keyboard*: Bypasses vocoder DSP, outputting the raw carrier signal for testing.
 
 ## Building & Running
 
 ### System Dependencies
 
-On Linux, you will need the ALSA development headers for audio and MIDI support.
+On Linux, ALSA development headers are required for audio and MIDI support.
 
 **Ubuntu/Debian:**
 ```bash
@@ -82,9 +59,7 @@ Requires Go 1.22 or later.
 go run ./cmd/vocoder
 ```
 
-This opens a terminal UI showing live audio levels, MIDI status, and all active notes. Plug in a MIDI controller and play chords while speaking into your mic.
-
-### Keyboard controls (TUI)
+### Keyboard Controls
 
 | Key | Action |
 |-----|--------|
@@ -95,7 +70,7 @@ This opens a terminal UI showing live audio levels, MIDI status, and all active 
 | `Tab` | Toggle Keyboard / Vocoder mode |
 | `q` / `Esc` | Quit |
 
-### Configurable parameters (TUI)
+### Configurable Parameters
 
 | Parameter | Range | Default |
 |-----------|-------|---------|
