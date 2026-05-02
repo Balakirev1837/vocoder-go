@@ -943,17 +943,20 @@ func (m model) restartStreams() {
 // stopStreams stops and releases all audio and MIDI resources.
 func (m model) stopStreams() {
 	m.state.mu.Lock()
-	if m.state.AudioStreams != nil {
-		m.state.AudioStreams.Close()
-		m.state.AudioStreams = nil
-	}
-	if m.state.MIDIStop != nil {
-		m.state.MIDIStop()
-		m.state.MIDIStop = nil
-	}
+	audio := m.state.AudioStreams
+	midiStop := m.state.MIDIStop
+	m.state.AudioStreams = nil
+	m.state.MIDIStop = nil
 	m.state.AudioActive = false
 	m.state.MIDIActive = false
 	m.state.mu.Unlock()
+
+	if audio != nil {
+		audio.Close()
+	}
+	if midiStop != nil {
+		midiStop()
+	}
 }
 
 // ── Public entry point ─────────────────────────────────────────────
