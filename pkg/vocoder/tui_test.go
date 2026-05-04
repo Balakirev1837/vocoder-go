@@ -293,8 +293,8 @@ func TestConfigFieldNeedsRestart(t *testing.T) {
 func TestRenderWaveformLength(t *testing.T) {
 	for _, waveType := range []int{0, 1, 2} {
 		got := renderWaveform(waveType, 0, 20)
-		if len(got) != 20 {
-			t.Errorf("renderWaveform(%d, 0, 20): expected length 20, got %d", waveType, len(got))
+		if len([]rune(got)) != 20 {
+			t.Errorf("renderWaveform(%d, 0, 20): expected length 20, got %d", waveType, len([]rune(got)))
 		}
 	}
 }
