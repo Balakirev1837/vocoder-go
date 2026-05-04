@@ -1011,6 +1011,12 @@ func (m model) stopStreams() {
 	if midiStop != nil {
 		midiStop()
 	}
+
+	// Teardown virtual mic if it was set up.
+	if m.virtualMicModuleID != "" {
+		_ = TeardownVirtualMic(m.virtualMicModuleID)
+		m.virtualMicModuleID = ""
+	}
 }
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -1029,5 +1035,6 @@ func RunTUI(state *SharedState, audioIn, audioOut, midiIn []string) (model, erro
 		m.stopStreams()
 		return m, fmt.Errorf("TUI error: %w", err)
 	}
+	m.stopStreams()
 	return m, nil
 }
