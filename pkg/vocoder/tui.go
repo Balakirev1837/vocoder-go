@@ -53,6 +53,8 @@ type Config struct {
 	Waveform int
 	// Envelope follower speed: 0=Fast, 1=Medium, 2=Slow.
 	EnvelopeSpeed int
+	// When true, sets up a virtual microphone device for output.
+	VirtualMic bool
 }
 
 // DefaultConfig returns a Config populated with sensible defaults,
@@ -72,6 +74,7 @@ func DefaultConfig() Config {
 		KeyboardMode:      false,
 		Waveform:          0,
 		EnvelopeSpeed:     1,
+		VirtualMic:        false,
 	}
 }
 
@@ -229,6 +232,7 @@ const (
 	fieldBands
 	fieldWaveform
 	fieldEnvelopeSpeed
+	fieldVirtualMic
 )
 
 var configFields = []configField{
@@ -244,6 +248,7 @@ var configFields = []configField{
 	fieldBands,
 	fieldWaveform,
 	fieldEnvelopeSpeed,
+	fieldVirtualMic,
 }
 
 func (f configField) label() string {
@@ -272,6 +277,8 @@ func (f configField) label() string {
 		return "Waveform"
 	case fieldEnvelopeSpeed:
 		return "Env Speed"
+	case fieldVirtualMic:
+		return "Virtual Mic"
 	default:
 		return ""
 	}
@@ -330,6 +337,11 @@ func (f configField) displayValue(cfg Config) string {
 		default:
 			return "Medium"
 		}
+	case fieldVirtualMic:
+		if cfg.VirtualMic {
+			return "On"
+		}
+		return "Off"
 	default:
 		return ""
 	}
@@ -377,6 +389,8 @@ func (f configField) adjust(cfg *Config, delta int) {
 		cfg.Waveform = ((cfg.Waveform+delta)%3 + 3) % 3
 	case fieldEnvelopeSpeed:
 		cfg.EnvelopeSpeed = ((cfg.EnvelopeSpeed+delta)%3 + 3) % 3
+	case fieldVirtualMic:
+		cfg.VirtualMic = !cfg.VirtualMic
 	}
 }
 
@@ -386,7 +400,7 @@ func (f configField) needsRestart() bool {
 	switch f {
 	case fieldAudioInputDevice, fieldAudioOutputDevice,
 		fieldMidiInputPort, fieldSampleRate, fieldBufferSize,
-		fieldBands, fieldEnvelopeSpeed:
+		fieldBands, fieldEnvelopeSpeed, fieldVirtualMic:
 		return true
 	default:
 		return false
@@ -558,6 +572,9 @@ type model struct {
 
 	// Spinner animation shown when audio is active
 	spinner spinner.Model
+
+	// Virtual mic management
+	virtualMicModuleID string
 }
 
 // newModel creates a new TUI model with the given shared state and device lists.
@@ -900,6 +917,43 @@ func (m model) restartStreams() {
 
 	// Stop existing streams first (synchronous — callback will quiesce).
 	m.stopStreams()
+
+	// Virtual mic setup/teardown.
+	if cfg.VirtualMic && m.virtualMicModuleID == "" {
+		id, err := SetupVirtualMic()
+		if err == nil {
+			m.virtualMicModuleID = id
+			if devs, err := ListOutputDevices(); err == nil {
+				names := make([]string, len(devs))
+				for i, d := range devs {
+					names[i] = d.Name
+				}
+				m.audioOutputDevices = names
+			}
+			vmName := "Vocoder_Virtual_Mic"
+			cfg.AudioOutputDevice = &vmName
+			m.state.mu.Lock()
+			m.state.Config.AudioOutputDevice = &vmName
+			m.state.mu.Unlock()
+		}
+	} else if !cfg.VirtualMic && m.virtualMicModuleID != "" {
+		_ = TeardownVirtualMic(m.virtualMicModuleID)
+		m.virtualMicModuleID = ""
+		if devs, err := ListOutputDevices(); err == nil {
+			names := make([]string, len(devs))
+			for i, d := range devs {
+				names[i] = d.Name
+			}
+			m.audioOutputDevices = names
+		}
+		if len(m.audioOutputDevices) > 0 {
+			first := m.audioOutputDevices[0]
+			cfg.AudioOutputDevice = &first
+			m.state.mu.Lock()
+			m.state.Config.AudioOutputDevice = &first
+			m.state.mu.Unlock()
+		}
+	}
 
 	// Reset DSP state for the new sample rate.
 	m.state.mu.Lock()
