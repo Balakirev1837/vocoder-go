@@ -287,3 +287,61 @@ func TestConfigFieldNeedsRestart(t *testing.T) {
 		}
 	}
 }
+
+// ── renderWaveform tests ──────────────────────────────────────────────
+
+func TestRenderWaveformLength(t *testing.T) {
+	for _, waveType := range []int{0, 1, 2} {
+		got := renderWaveform(waveType, 0, 20)
+		if len(got) != 20 {
+			t.Errorf("renderWaveform(%d, 0, 20): expected length 20, got %d", waveType, len(got))
+		}
+	}
+}
+
+func TestRenderWaveformAnimates(t *testing.T) {
+	// Different frames should produce different strings (for sine at least).
+	a := renderWaveform(0, 0, 20)
+	b := renderWaveform(0, 1, 20)
+	if a == b {
+		t.Error("expected different output for different frames")
+	}
+}
+
+func TestRenderWaveformSineRunes(t *testing.T) {
+	// Sine runes: " ▂▃▄▅▆▇█▇▆▅▄▃▂" (14 runes). At frame=0, width=14,
+	// we should get exactly the rune sequence in order.
+	got := renderWaveform(0, 0, 14)
+	want := " ▂▃▄▅▆▇█▇▆▅▄▃▂"
+	if got != want {
+		t.Errorf("renderWaveform(0, 0, 14) = %q, want %q", got, want)
+	}
+}
+
+func TestRenderWaveformSawtoothRunes(t *testing.T) {
+	// Sawtooth runes: " ▂▃▄▅▆▇█" (8 runes).
+	got := renderWaveform(1, 0, 8)
+	want := " ▂▃▄▅▆▇█"
+	if got != want {
+		t.Errorf("renderWaveform(1, 0, 8) = %q, want %q", got, want)
+	}
+}
+
+func TestRenderWaveformSquareRunes(t *testing.T) {
+	// Square runes: "████    " (8 runes).
+	got := renderWaveform(2, 0, 8)
+	want := "████    "
+	if got != want {
+		t.Errorf("renderWaveform(2, 0, 8) = %q, want %q", got, want)
+	}
+}
+
+func TestRenderWaveformWraps(t *testing.T) {
+	// Width > rune array length should wrap around.
+	got := renderWaveform(2, 0, 16)
+	// Square pattern is 8 chars, so 16 = pattern repeated twice.
+	want := "████    ████    "
+	if got != want {
+		t.Errorf("renderWaveform(2, 0, 16) = %q, want %q", got, want)
+	}
+}

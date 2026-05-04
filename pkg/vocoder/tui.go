@@ -573,6 +573,9 @@ type model struct {
 	// Spinner animation shown when audio is active
 	spinner spinner.Model
 
+	// Waveform animation frame counter
+	animFrame int
+
 	// Virtual mic management
 	virtualMicModuleID string
 }
@@ -636,6 +639,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
 		// Periodic status refresh — just re-render by requesting the next tick.
+		m.animFrame++
 		return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
@@ -800,6 +804,26 @@ func (m model) renderConfigPanel() string {
 	return box
 }
 
+// renderWaveform builds a string of length width representing an animated
+// waveform using Unicode block elements. waveType: 0=Sine, 1=Sawtooth, 2=Square.
+func renderWaveform(waveType int, frame int, width int) string {
+	var runes []rune
+	switch waveType {
+	case 1: // Sawtooth
+		runes = []rune(" ▂▃▄▅▆▇█")
+	case 2: // Square
+		runes = []rune("████    ")
+	default: // Sine
+		runes = []rune(" ▂▃▄▅▆▇█▇▆▅▄▃▂")
+	}
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		idx := (i + frame) % len(runes)
+		b.WriteRune(runes[idx])
+	}
+	return b.String()
+}
+
 // renderStatusPanel renders the right column with live status info.
 func (m model) renderStatusPanel() string {
 	m.state.mu.Lock()
@@ -807,6 +831,7 @@ func (m model) renderStatusPanel() string {
 	midiActive := m.state.MIDIActive
 	inputLevel := m.state.InputLevel
 	outputLevel := m.state.OutputLevel
+	waveform := m.state.Config.Waveform
 	m.state.mu.Unlock()
 
 	noteCount := m.state.ActiveNotes.Count()
@@ -865,6 +890,22 @@ func (m model) renderStatusPanel() string {
 	} else {
 		b.WriteString(" Notes  ♫ ---")
 	}
+
+	// Waveform animation
+	b.WriteString("\n\n")
+	waveStr := renderWaveform(waveform, m.animFrame, 20)
+	var waveStyle lipgloss.Style
+	switch waveform {
+	case 1: // Sawtooth
+		waveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF")) // Magenta
+	case 2: // Square
+		waveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00")) // Yellow
+	default: // Sine
+		waveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF")) // Cyan
+	}
+	waveNames := [...]string{"Sine", "Sawtooth", "Square"}
+	waveName := waveNames[waveform]
+	b.WriteString(fmt.Sprintf(" Carrier %s %s %s", waveName, waveStyle.Render(fmt.Sprintf("[ %s ]", waveStr)), waveName))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
